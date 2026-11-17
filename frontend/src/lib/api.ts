@@ -117,9 +117,28 @@ async function refresh(ns: Namespace): Promise<boolean> {
     body: JSON.stringify({ refresh: s.refresh }),
   });
   if (!r.ok) return false;
-  const body = await r.json();
+  const body = await r.json().catch(() => null);
+  if (!body?.access) return false;
   saveSession(ns, { ...s, access: body.access, refresh: body.refresh ?? s.refresh });
   return true;
+}
+
+/** Parse an API response. Proxies and crashed servers answer with HTML pages; turn those into a readable error
+ *  instead of "SyntaxError: Unexpected token '<'". */
+function parseBody(text: string, status: number): any {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const title = /<title>([^<]*)<\/title>/i.exec(text)?.[1]?.trim();
+    const message =
+      status === 502 || status === 503 || status === 504
+        ? `The API server is not responding (${status}${title ? `: ${title}` : ""}). Please try again shortly; if it persists, an administrator should run deploy/scripts/diagnose.sh.`
+        : status >= 500
+          ? `The server had an internal error (${status}${title ? `: ${title}` : ""}). Check the backend log.`
+          : `Unexpected response from the server (${status}${title ? `: ${title}` : ""}).`;
+    return { error: { code: `http_${status}`, message } };
+  }
 }
 
 export interface RequestOpts {
@@ -146,7 +165,7 @@ export function api(ns: Namespace) {
       return request<T>(path, opts, true);
     }
     const text = await r.text();
-    const body = text ? JSON.parse(text) : null;
+    const body = parseBody(text, r.status);
     if (!r.ok) {
       if (r.status === 401 && opts.auth !== false) {
         saveSession(ns, null);

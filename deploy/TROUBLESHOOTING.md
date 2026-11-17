@@ -144,6 +144,19 @@ Make sure `/srv/pizza` is on the data volume.
 - **403 CSRF** on `/admin/`: add `https://pos.amrt.ca` to `DJANGO_CSRF_TRUSTED_ORIGINS`.
 - **CORS errors** in the browser from another origin: add that origin to `CORS_ALLOWED_ORIGINS`.
 
+### G. "SyntaxError: Unexpected token '<', \"<!doctype \"… is not valid JSON" in the portal
+
+The API answered with an HTML page instead of JSON. A lowercase `<!doctype html>` page titled
+"Server Error (500)" is Django's crash page. Read the traceback with:
+
+```bash
+docker compose logs --tail 200 backend | grep -B2 -A30 "Internal Server Error"
+```
+
+Known cause, fixed in this update: on an installation created with `createsuperuser` (no demo data) there was
+no Headquarters record, so **creating a franchisee** crashed. Migration `organization.0004_ensure_headquarters`
+creates it, and API errors are now always returned as JSON with a request id that matches the server log.
+
 ## 3. Deploy this update
 
 ```bash

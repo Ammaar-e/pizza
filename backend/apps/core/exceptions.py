@@ -1,8 +1,10 @@
 import logging
 
+from django.db import IntegrityError
 from rest_framework import status
 from rest_framework.exceptions import APIException
-from rest_framework.views import exception_handler
+from rest_framework.response import Response
+from rest_framework.views import exception_handler, set_rollback
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +35,27 @@ class ManagerAuthorizationRequired(DomainError):
     default_detail = "This operation requires manager authorization."
 
 
+def _unhandled(exc, context):
+    """API clients always get JSON, never Django's HTML error page (which browsers then fail to parse as
+    "Unexpected token '<'"). The full traceback goes to the server log with the request id."""
+    request = context.get("request")
+    request_id = getattr(request, "request_id", None) if request is not None else None
+    set_rollback()
+    if isinstance(exc, IntegrityError):
+        logger.warning("Integrity error on %s (request %s): %s", getattr(request, "path", "?"), request_id, exc)
+        return Response({"error": {"code": "conflict", "message": "This conflicts with existing data "
+                                   "(for example a duplicate code or number) or a required link is missing.",
+                                   "details": None, "errors": None, "request_id": request_id}}, status=409)
+    logger.error("Unhandled error on %s (request %s)", getattr(request, "path", "?"), request_id, exc_info=exc)
+    return Response({"error": {"code": "server_error", "message": "Internal server error. The details are in "
+                               f"the server log (request id {request_id}).", "details": None, "errors": None,
+                               "request_id": request_id}}, status=500)
+
+
 def api_exception_handler(exc, context):
     response = exception_handler(exc, context)
     if response is None:
-        return None
+        return _unhandled(exc, context)
     request = context.get("request")
     body = {
         "error": {

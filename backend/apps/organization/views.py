@@ -33,14 +33,13 @@ class HeadquartersView(ContextMixin, APIView):
 
     @extend_schema(responses=HeadquartersSerializer)
     def get(self, request):
-        hq = Headquarters.objects.first()
-        return Response(HeadquartersSerializer(hq).data if hq else {})
+        return Response(HeadquartersSerializer(Headquarters.current()).data)
 
     @extend_schema(request=HeadquartersSerializer, responses=HeadquartersSerializer)
     def patch(self, request):
         if not request.user.has_permission("org.manage_franchisees"):
             raise PermissionDenied()
-        hq = Headquarters.objects.first()
+        hq = Headquarters.current()
         s = HeadquartersSerializer(hq, data=request.data, partial=True)
         s.is_valid(raise_exception=True)
         s.save()
@@ -62,7 +61,7 @@ class FranchiseeViewSet(ContextMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         self._require()
-        f = serializer.save(headquarters=Headquarters.objects.first())
+        f = serializer.save(headquarters=Headquarters.current())
         audit("franchisee.create", f)
 
     def perform_update(self, serializer):
