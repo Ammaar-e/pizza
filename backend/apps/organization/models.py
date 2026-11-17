@@ -29,6 +29,15 @@ class Headquarters(TimeStampedModel):
     class Meta:
         verbose_name_plural = "headquarters"
 
+    @classmethod
+    def current(cls) -> "Headquarters":
+        """The organisation root. Created on first use, so a fresh installation (``createsuperuser`` only,
+        no demo seed) can create franchisees immediately."""
+        hq = cls.objects.order_by("id").first()
+        if hq is None:
+            hq, _ = cls.objects.get_or_create(name="Headquarters")
+        return hq
+
     def __str__(self):
         return self.name
 
