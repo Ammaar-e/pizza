@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import uuid
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
@@ -158,33 +159,81 @@ class StoreSpecialHours(models.Model):
 
 
 class Device(TimeStampedModel):
-    """A registered POS terminal or KDS screen."""
+    """A registered restaurant device (POS terminal, register, KDS, printer, workstation...).
+
+    Device identity is separate from employee identity: a device authenticates with its own
+    revocable credential (``devices.DeviceCredential``); employees then sign in on it.
+    """
 
     TYPE_POS = "pos"
+    TYPE_REGISTER = "register"
     TYPE_KDS = "kds"
+    TYPE_PRINTER = "printer"
+    TYPE_WORKSTATION = "manager_workstation"
     TYPE_GATEWAY = "gateway"
-    TYPES = [(TYPE_POS, "POS terminal"), (TYPE_KDS, "Kitchen display"), (TYPE_GATEWAY, "Store gateway")]
+    TYPE_OTHER = "other"
+    TYPES = [(TYPE_POS, "POS terminal"), (TYPE_REGISTER, "Cash register"), (TYPE_KDS, "Kitchen display"),
+             (TYPE_PRINTER, "Receipt printer"), (TYPE_WORKSTATION, "Manager workstation"),
+             (TYPE_GATEWAY, "Store gateway"), (TYPE_OTHER, "Other authorized device")]
 
-    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name="devices")
-    device_type = models.CharField(max_length=20, choices=TYPES)
+    STATUS_PENDING = "pending"
+    STATUS_ACTIVE = "active"
+    STATUS_DEACTIVATED = "deactivated"
+    STATUSES = [(STATUS_PENDING, "Pending approval"), (STATUS_ACTIVE, "Active"), (STATUS_DEACTIVATED, "Deactivated")]
+
+    uid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False, help_text="Unique device identifier")
+    store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name="devices")
+    device_type = models.CharField(max_length=30, choices=TYPES)
     name = models.CharField(max_length=100)
-    token_hash = models.CharField(max_length=128, unique=True)
-    token_prefix = models.CharField(max_length=12)
-    is_active = models.BooleanField(default=True)
-    last_seen_at = models.DateTimeField(null=True, blank=True)
-    last_ip = models.GenericIPAddressField(null=True, blank=True)
-    user_agent = models.CharField(max_length=300, blank=True)
+    status = models.CharField(max_length=20, choices=STATUSES, default=STATUS_ACTIVE, db_index=True)
+    parent_device = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL,
+                                      related_name="peripherals", help_text="e.g. the POS a printer is attached to")
     registered_by = models.ForeignKey("accounts.User", null=True, on_delete=models.SET_NULL, related_name="+")
+    approved_by = models.ForeignKey("accounts.User", null=True, blank=True, on_delete=models.SET_NULL,
+                                    related_name="+")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    deactivated_at = models.DateTimeField(null=True, blank=True)
+    deactivation_reason = models.CharField(max_length=200, blank=True)
     kitchen_station = models.ForeignKey(
         "kitchen.KitchenStation", null=True, blank=True, on_delete=models.SET_NULL, related_name="devices"
     )
+    # Connectivity (server-side observations; never trusted from the device alone)
+    last_seen_at = models.DateTimeField(null=True, blank=True, help_text="Last authenticated request")
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    is_online = models.BooleanField(default=False, help_text="Derived by the server from heartbeat timestamps")
+    last_ip = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=300, blank=True)
+    # Reported by the device in heartbeats
+    software_version = models.CharField(max_length=40, blank=True)
+    os_info = models.CharField(max_length=200, blank=True)
+    app_status = models.CharField(max_length=40, blank=True)
+    sync_status = models.CharField(max_length=40, blank=True)
+    pending_offline_count = models.PositiveIntegerField(default=0)
+    sync_pending_since = models.DateTimeField(null=True, blank=True)
+    current_user = models.ForeignKey("accounts.User", null=True, blank=True, on_delete=models.SET_NULL,
+                                     related_name="+")
+    current_user_since = models.DateTimeField(null=True, blank=True)
+    # Configuration
+    config_profile = models.ForeignKey("devices.DeviceConfiguration", null=True, blank=True,
+                                       on_delete=models.SET_NULL, related_name="devices")
+    local_settings = models.JSONField(default=dict, blank=True)
+    config_version = models.PositiveIntegerField(default=1, help_text="Bumped whenever effective config changes")
+    applied_config_version = models.PositiveIntegerField(default=0, help_text="Last version the device confirmed")
 
     class Meta:
         ordering = ["store", "name"]
+        indexes = [models.Index(fields=["store", "status"]), models.Index(fields=["status", "is_online"])]
 
-    @staticmethod
-    def generate_token() -> str:
-        return "dev_" + secrets.token_urlsafe(32)
+    def __str__(self):
+        return f"{self.name} ({self.store.number})"
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == self.STATUS_ACTIVE
+
+    @property
+    def franchisee_id(self):
+        return self.store.franchisee_id
 
     @staticmethod
     def hash_token(token: str) -> str:

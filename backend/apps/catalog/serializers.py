@@ -6,7 +6,6 @@ from .models import (
     CatalogVersion,
     Category,
     Crust,
-    Discount,
     Modifier,
     ModifierGroup,
     PrepCategory,
@@ -71,13 +70,6 @@ class AdditionalChargeSerializer(serializers.ModelSerializer):
     class Meta:
         model = AdditionalCharge
         fields = ["id", "code", "name", "amount_cents", "applies_to", "tax_category", "is_active"]
-
-
-class DiscountSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Discount
-        fields = ["id", "franchisee", "code", "name", "discount_type", "value", "requires_manager", "is_active",
-                  "max_amount_cents"]
 
 
 class ProductSizeSerializer(serializers.ModelSerializer):

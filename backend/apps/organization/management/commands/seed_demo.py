@@ -13,7 +13,6 @@ from apps.catalog.models import (
     AdditionalCharge,
     Category,
     Crust,
-    Discount,
     Modifier,
     ModifierGroup,
     PrepCategory,
@@ -50,7 +49,10 @@ class Command(BaseCommand):
     def handle(self, *args, **opts):
         pw = opts["password"]
         hq, _ = Headquarters.objects.get_or_create(name="Pizza Network HQ", defaults={
-            "legal_name": "Pizza Network Inc.", "currency": "CAD", "policies": {"max_discount_percent": 50}})
+            "legal_name": "Pizza Network Inc.", "currency": "CAD", "policies": {
+                "max_discount_percent": 50, "cash_variance_threshold_cents": 500,
+                "devices_require_approval": True, "franchisee_can_approve_devices": True,
+                "require_registered_device_for_pos": False, "device_offline_after_seconds": 180}})
 
         # --- taxes, prep categories ------------------------------------------------
         food, _ = TaxCategory.objects.get_or_create(code="FOOD", defaults={"name": "Prepared food"})
@@ -131,10 +133,6 @@ class Command(BaseCommand):
         products += [wings, bread, cola]
         AdditionalCharge.objects.get_or_create(code="BAG", defaults={"name": "Bag fee", "amount_cents": 0,
                                                                      "applies_to": "all", "is_active": False})
-        Discount.objects.get_or_create(franchisee=None, code="STAFF10", defaults={
-            "name": "Staff 10%", "discount_type": "percent", "value": 1000, "requires_manager": True})
-        Discount.objects.get_or_create(franchisee=None, code="PROMO5", defaults={
-            "name": "$5 off", "discount_type": "fixed", "value": 500, "requires_manager": False})
 
         # --- organisation & users ----------------------------------------------------
         role = {r.code: r for r in Role.objects.all()}
@@ -175,5 +173,89 @@ class Command(BaseCommand):
                 user(f"cashier.{number}", "cashier", f"Cashier {number}", stores=[s], pin="2222")
                 user(f"kitchen.{number}", "kitchen", f"Cook {number}", stores=[s], pin="3333")
                 user(f"driver.{number}", "delivery", f"Driver {number}", stores=[s], pin="4444")
+        seed_modules(products)
         self.stdout.write(self.style.SUCCESS("Demo data ready. Users: hq.admin, owner.a, manager.1001, "
                                              "cashier.1001, kitchen.1001 (password as given)."))
+
+
+def seed_modules(products):
+    """Demo data for promotions, dispatch and device management."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.devices.models import DeviceConfiguration
+    from apps.dispatch.models import DeliveryZone, DriverProfile
+    from apps.promotions.models import (
+        FranchisePromotionPolicy,
+        Promotion,
+        PromotionCode,
+        PromotionProduct,
+    )
+
+    sku = {p.sku: p for p in products}
+    pizzas = Category.objects.get(code="PIZZA")
+    toppings = ModifierGroup.objects.get(code="TOPPINGS")
+
+    def promo(name, **kw):
+        items = kw.pop("items", [])
+        codes = kw.pop("codes", [])
+        p, created = Promotion.objects.get_or_create(name=name, franchisee=kw.pop("franchisee", None), defaults=kw)
+        if created:
+            for i in items:
+                PromotionProduct.objects.create(promotion=p, **i)
+            for c in codes:
+                PromotionCode.objects.get_or_create(code=c, defaults={"promotion": p})
+            p.status = p.derive_status()
+            p.save(update_fields=["status"])
+        return p
+
+    promo("Staff 10%", promo_type="percent", value=1000, requires_code=True, requires_manager=True, codes=["STAFF10"],
+          campaign="Staff")
+    promo("$5 off $20+", promo_type="fixed", value=500, min_subtotal_cents=2000, requires_code=True, codes=["PROMO5"],
+          campaign="Always on")
+    promo("Free garlic bread with any large pizza", promo_type="free_product", auto_apply=True, priority=10,
+          get_quantity=1, campaign="Garlic bread launch",
+          items=[{"role": "eligible", "category": pizzas, "size_code": "L"}, {"role": "reward", "product": sku["SD-GBREAD"]}])
+    promo("Wings & Cola deal $14.99", promo_type="bundle", value=1499, auto_apply=True, priority=5, campaign="Game night",
+          items=[{"role": "bundle", "product": sku["SD-WINGS"], "slot": 0},
+                 {"role": "bundle", "product": sku["DR-COLA"], "slot": 1}])
+    promo("2 free toppings", promo_type="free_modifier", get_quantity=2, requires_code=True, codes=["TOPPINGS2"],
+          items=[{"role": "eligible", "category": pizzas}, {"role": "modifier", "modifier_group": toppings}],
+          max_redemptions=500, max_per_customer=1, campaign="Toppings week")
+    promo("Weekend BOGO pizza", promo_type="bogo", auto_apply=True, combinable=False, priority=20, days_of_week=[5, 6],
+          starts_at=timezone.now() + timedelta(days=7), ends_at=timezone.now() + timedelta(days=37),
+          items=[{"role": "eligible", "category": pizzas}], campaign="Weekend BOGO")
+    for code, types, sm in (("A", ["percent", "fixed", "bogo", "free_product", "bundle"], True),
+                            ("B", ["percent", "fixed"], False), ("C", [], False)):
+        f = Franchisee.objects.get(code=code)
+        FranchisePromotionPolicy.objects.get_or_create(franchisee=f, defaults={
+            "can_create": bool(types), "allowed_types": types, "store_managers_can_manage": sm})
+
+    for s in Store.objects.all():
+        if s.number == "1001" and not s.delivery_config.get("auto_assign"):
+            s.latitude, s.longitude = 43.642600, -79.387100
+            s.delivery_config = {**s.delivery_config, "auto_assign": True, "proof_of_delivery": "none"}
+            s.save()
+        if s.number == "1002" and not s.delivery_zones.exists():
+            s.latitude, s.longitude = 43.704400, -79.398600
+            s.delivery_config = {**s.delivery_config, "proof_of_delivery": "photo"}
+            s.save()
+            DeliveryZone.objects.create(store=s, name="Core (0–3 km)", min_distance_km=0, max_distance_km=3,
+                                        postal_prefixes=["M4S", "M5P"], fee_cents=299, min_order_cents=1500,
+                                        estimated_minutes=30)
+            DeliveryZone.objects.create(store=s, name="Extended (3–8 km)", min_distance_km=3, max_distance_km=8,
+                                        fee_cents=499, min_order_cents=2500, estimated_minutes=45, sort_order=1)
+    for u in User.objects.filter(role__code="delivery"):
+        DriverProfile.objects.get_or_create(user=u, defaults={"phone": "+1-555-0100", "vehicle": "Hatchback"})
+
+    DeviceConfiguration.objects.get_or_create(name="Standard POS", defaults={
+        "description": "Front counter terminals and registers", "device_types": ["pos", "register",
+                                                                                 "manager_workstation"],
+        "local_overridable": ["receipt_copies", "idle_lock_minutes"], "approved_versions": ["1.1.0"],
+        "minimum_version": "1.0.0", "is_default": True})
+    DeviceConfiguration.objects.get_or_create(name="Kitchen display", defaults={
+        "description": "KDS screens", "device_types": ["kds"], "is_default": True, "approved_versions": ["1.1.0"],
+        "minimum_version": "1.0.0", "local_overridable": ["idle_lock_minutes"],
+        "settings": {"features": {"cash_drawer": False, "refunds": False, "discounts": False, "coupon_entry": False,
+                                  "offline_queue": False, "dispatch": False}, "heartbeat_interval_seconds": 60}})

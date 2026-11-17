@@ -40,7 +40,8 @@ def api_exception_handler(exc, context):
     request = context.get("request")
     body = {
         "error": {
-            "code": getattr(exc, "code", None) or getattr(exc, "default_code", "error"),
+            "code": getattr(exc, "code", None) or getattr(getattr(exc, "detail", None), "code", None)
+            or getattr(exc, "default_code", "error"),
             "message": response.data.get("detail") if isinstance(response.data, dict) and "detail" in response.data else "Validation failed" if response.status_code == 400 else str(exc),
             "details": None if isinstance(response.data, dict) and set(response.data.keys()) == {"detail"} else response.data,
             "errors": getattr(exc, "errors", None) or None,

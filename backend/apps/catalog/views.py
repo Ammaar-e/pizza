@@ -107,40 +107,6 @@ class ProductViewSet(AuditedModelViewSet):
         return Response(s.CatalogVersionSerializer(qs, many=True).data)
 
 
-class DiscountViewSet(AuditedModelViewSet):
-    serializer_class = s.DiscountSerializer
-    permission_classes = [IsStaffUser]
-    audit_name = "discount"
-
-    def get_queryset(self):
-        ids = accessible_franchisee_ids(self.request.user)
-        qs = m.Discount.objects.all()
-        if ids is not None:
-            qs = qs.filter(franchisee__isnull=True) | qs.filter(franchisee_id__in=ids)
-        return qs
-
-    def _check(self, franchisee):
-        u = self.request.user
-        if franchisee is None and not u.has_permission("catalog.manage_master"):
-            raise PermissionDenied("Only headquarters can create network-wide discounts")
-        if franchisee is not None and not (is_hq(u) or (u.franchisee_id == franchisee.id and u.has_permission(
-                "catalog.configure_store_menu"))):
-            raise PermissionDenied()
-
-    def perform_create(self, serializer):
-        self._check(serializer.validated_data.get("franchisee"))
-        super().perform_create(serializer)
-
-    def perform_update(self, serializer):
-        self._check(serializer.validated_data.get("franchisee", serializer.instance.franchisee))
-        super().perform_update(serializer)
-
-    def perform_destroy(self, instance):
-        self._check(instance.franchisee)
-        instance.is_active = False
-        instance.save(update_fields=["is_active"])
-
-
 class ProductRequestViewSet(ContextMixin, viewsets.ModelViewSet):
     serializer_class = s.ProductRequestSerializer
     permission_classes = [IsStaffUser]
@@ -292,32 +258,72 @@ class QuoteView(ContextMixin, APIView):
     client_scope = "menu:read"
     client_write_allowed = True  # quoting is read-only despite using POST
 
-    @extend_schema(request=s.QuoteLineSerializer(many=True), responses=dict)
+    @extend_schema(request=dict, responses=dict)
     def post(self, request, store_id):
+        """Price, validate and apply promotions without creating an order.
+
+        Body: ``{items: [...], order_type, channel?, promo_codes?: [], promotion_ids?: [],
+        customer?: {phone, email}, delivery_address?}``. Returns per-line original and discounted
+        prices, applied/rejected/available promotions, delivery fee/eligibility, tax and total."""
+        from apps.promotions.engine import evaluate
+        from apps.promotions.services import context_for, lines_from_priced
+
         store = Store.objects.filter(pk=store_id).select_related("franchisee__headquarters").first()
         if store is None or not can_access_store(request, store):
             raise PermissionDenied("Store not accessible")
         lines = s.QuoteLineSerializer(data=request.data.get("items", []), many=True)
         lines.is_valid(raise_exception=True)
-        out, issues, subtotal, tax = [], [], 0, 0
+        client = getattr(request._request, "api_client", None)
+        channel = client.order_source if client else (request.data.get("channel") or "pos")
+        order_type = request.data.get("order_type", "pickup")
+        priced, issues = [], []
         for idx, line in enumerate(lines.validated_data):
             try:
-                pl = price_line(store, line, channel=request.data.get("channel"))
-                subtotal += pl.line_total_cents
-                tax += pl.tax_cents
-                out.append({"product": pl.product.sku, "name": pl.product.name,
-                            "size": pl.size.code if pl.size else None, "crust": pl.crust.code if pl.crust else None,
-                            "quantity": pl.quantity, "unit_price_cents": pl.unit_price_cents,
-                            "line_total_cents": pl.line_total_cents, "tax_cents": pl.tax_cents,
-                            "modifiers": [x.as_dict() for x in pl.modifiers],
-                            "removed": [r.code for r in pl.removed]})
+                priced.append(price_line(store, line))
             except LineValidationError as e:
+                priced.append(None)
                 issues += [{**i.as_dict(), "line": idx} for i in e.issues]
-        charges = applicable_charges(store, request.data.get("order_type", "pickup"))
+        valid = [p for p in priced if p is not None]
+        subtotal = sum(p.line_total_cents for p in valid)
+        ctx = context_for(store, channel=channel, order_type=order_type, lines=lines_from_priced(priced),
+                          customer=request.data.get("customer") or {})
+        ev = evaluate(ctx, codes=request.data.get("promo_codes") or [],
+                      promotion_ids=request.data.get("promotion_ids") or [])
+        line_disc = ev.line_discounts()
+        out, tax = [], 0
+        for idx, pl in enumerate(priced):
+            if pl is None:
+                continue
+            disc = line_disc.get(idx, 0)
+            t, _ = compute_tax(pl.line_total_cents - disc, tax_rates_for(store, pl.product.tax_category_id))
+            tax += t
+            out.append({"line": idx, "product": pl.product.sku, "name": pl.product.name,
+                        "size": pl.size.code if pl.size else None, "crust": pl.crust.code if pl.crust else None,
+                        "quantity": pl.quantity, "unit_price_cents": pl.unit_price_cents,
+                        "line_total_cents": pl.line_total_cents, "discount_cents": disc,
+                        "discounted_total_cents": pl.line_total_cents - disc, "tax_cents": t,
+                        "modifiers": [x.as_dict() for x in pl.modifiers], "removed": [r.code for r in pl.removed]})
+        delivery = None
+        fee = None
+        if order_type == "delivery":
+            from apps.core.exceptions import DomainError
+            from apps.dispatch.services import resolve_delivery
+
+            try:
+                delivery = resolve_delivery(store, request.data.get("delivery_address") or {}, subtotal)
+                fee = delivery["fee_cents"]
+            except DomainError as e:
+                delivery = {"eligible": False, "code": e.code, "message": str(e.detail)}
+                issues.append({"code": e.code, "message": str(e.detail), "ref": None})
+        charges = applicable_charges(store, order_type, delivery_fee_cents=fee)
         for c in charges:
             tc = c.pop("tax_category_id", None)
             if tc:
                 tax += compute_tax(c["amount_cents"], tax_rates_for(store, tc))[0]
         ch_total = sum(c["amount_cents"] for c in charges)
-        return Response({"valid": not issues, "issues": issues, "lines": out, "subtotal_cents": subtotal,
-                         "charges": charges, "tax_cents": tax, "total_cents": subtotal + tax + ch_total})
+        discount = ev.total_cents
+        bad_codes = [r for r in ev.rejected if r.get("code")]
+        return Response({"valid": not issues and not bad_codes, "issues": issues, "lines": out,
+                         "subtotal_cents": subtotal, "discount_cents": discount, "promotions": ev.as_dict(),
+                         "delivery": delivery, "charges": charges, "tax_cents": tax,
+                         "total_cents": subtotal - discount + tax + ch_total})

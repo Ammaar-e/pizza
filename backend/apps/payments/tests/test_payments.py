@@ -9,15 +9,11 @@ pytestmark = pytest.mark.django_db
 
 @pytest.fixture
 def pos(seeded, api, as_user):
-    from apps.organization.models import Device
+    from apps.devices.models import DeviceCredential
+    from conftest import register_device
 
-    mgr = as_user("manager.1001", store_number="1001")
-    r = mgr.post("/api/v1/devices/", {"store": seeded["1001"].id, "device_type": "pos", "name": "Front 1"},
-                 format="json")
-    assert r.status_code == 201
-    token = r.json()["device_token"]
-    assert Device.objects.get(pk=r.json()["id"]).token_hash != token  # only hash stored
-    api.credentials()
+    token, dev_id = register_device(api)
+    assert DeviceCredential.objects.get(device_id=dev_id).secret_hash not in token  # only a hash is stored
     c = as_user("cashier.1001", store_number="1001", device_token=token)
     return c, token
 

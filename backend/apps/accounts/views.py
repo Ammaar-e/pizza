@@ -12,6 +12,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.core.audit import audit
 from apps.core.tenancy import accessible_store_ids, is_hq
 from apps.core.throttling import LoginRateThrottle
+from apps.core.middleware import client_ip
 from apps.core.views import ContextMixin
 from apps.organization.models import Device, Store
 
@@ -94,10 +95,20 @@ class POSLoginView(ContextMixin, APIView):
             raise AuthenticationFailed("Unknown or inactive store number")
         device = None
         raw = request.META.get("HTTP_X_DEVICE_TOKEN")
+        from apps.devices.services import DeviceAuthError, authenticate_device, policy
+
         if raw:
-            device = Device.objects.filter(token_hash=Device.hash_token(raw), is_active=True).first()
-            if device is None or device.store_id != store.id:
+            try:
+                device, _ = authenticate_device(raw, client_ip(request))
+            except DeviceAuthError as e:
+                raise AuthenticationFailed(str(e), code=e.code)
+            if device.store_id != store.id:
+                audit("auth.pos_login_wrong_store_device", device, entity_type="Device",
+                      actor_label=f"anon:{d['username']}", data={"store": store.number})
                 raise AuthenticationFailed("This device is not registered to this store")
+        elif policy("require_registered_device_for_pos"):
+            raise AuthenticationFailed("Sign-in is only permitted from a registered, approved device",
+                                       code="device_required")
         user = None
         if d.get("password"):
             user = authenticate(request, username=d["username"], password=d["password"])
@@ -116,7 +127,10 @@ class POSLoginView(ContextMixin, APIView):
             raise AuthenticationFailed("Employee does not have POS or kitchen access")
         user.last_login = timezone.now()
         user.save(update_fields=["last_login"])
-        audit("auth.pos_login", store, actor=user, data={"device": device.name if device else None})
+        if device is not None:
+            Device.objects.filter(pk=device.pk).update(current_user=user, current_user_since=timezone.now())
+        audit("auth.pos_login", store, actor=user, data={"device": device.name if device else None,
+                                                         "device_uid": str(device.uid) if device else None})
         return Response({
             "tokens": issue_tokens(user, store),
             "user": profile(user),
@@ -238,57 +252,3 @@ class UserViewSet(ContextMixin, viewsets.ModelViewSet):
         instance.is_active = False
         instance.save(update_fields=["is_active"])
         audit("user.deactivate", instance)
-
-
-class DeviceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Device
-        fields = ["id", "store", "device_type", "name", "is_active", "last_seen_at", "token_prefix", "created_at",
-                  "kitchen_station"]
-        read_only_fields = ["last_seen_at", "token_prefix", "created_at"]
-
-
-class DeviceViewSet(ContextMixin, viewsets.ModelViewSet):
-    """Register POS/KDS devices. The device token is returned only once at registration."""
-
-    serializer_class = DeviceSerializer
-    permission_classes = [IsStaffUser]
-    http_method_names = ["get", "post", "patch", "delete"]
-
-    def get_queryset(self):
-        ids = accessible_store_ids(self.request.user)
-        qs = Device.objects.select_related("store")
-        if ids is not None:
-            qs = qs.filter(store_id__in=ids)
-        if self.request.query_params.get("store"):
-            qs = qs.filter(store_id=self.request.query_params["store"])
-        return qs
-
-    def create(self, request, *args, **kwargs):
-        if not request.user.has_permission("org.manage_devices"):
-            raise PermissionDenied("Missing permission: org.manage_devices")
-        s = self.get_serializer(data=request.data)
-        s.is_valid(raise_exception=True)
-        store = s.validated_data["store"]
-        if not user_can_operate_store(request.user, store):
-            raise PermissionDenied("Store not accessible")
-        token = Device.generate_token()
-        device = s.save(token_hash=Device.hash_token(token), token_prefix=token[:10], registered_by=request.user,
-                        user_agent=request.META.get("HTTP_USER_AGENT", "")[:300])
-        audit("device.register", device, data={"type": device.device_type})
-        out = DeviceSerializer(device).data
-        out["device_token"] = token
-        return Response(out, status=status.HTTP_201_CREATED)
-
-    def perform_update(self, serializer):
-        if not self.request.user.has_permission("org.manage_devices"):
-            raise PermissionDenied("Missing permission: org.manage_devices")
-        d = serializer.save()
-        audit("device.update", d)
-
-    def perform_destroy(self, instance):
-        if not self.request.user.has_permission("org.manage_devices"):
-            raise PermissionDenied("Missing permission: org.manage_devices")
-        instance.is_active = False
-        instance.save(update_fields=["is_active"])
-        audit("device.revoke", instance)

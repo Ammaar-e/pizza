@@ -53,6 +53,11 @@ class OrderCreateSerializer(serializers.Serializer):
                                      help_text="POS only: record a provider order manually")
     external_order_id = serializers.CharField(required=False, allow_blank=True, max_length=100)
     offline_client_ref = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    promo_codes = serializers.ListField(child=serializers.CharField(max_length=40), required=False, default=list,
+                                        help_text="Coupon / promotion codes; validated server-side")
+    promotion_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list,
+                                          help_text="POS only: manually selected promotions without codes")
+    manager_code = serializers.CharField(required=False, allow_blank=True, write_only=True)
 
     def validate(self, attrs):
         if not attrs.get("store_id") and not attrs.get("store_number"):
@@ -76,7 +81,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrderItem
         fields = ["id", "position", "sku", "name", "size_code", "size_name", "crust_code", "crust_name", "quantity",
-                  "unit_price_cents", "line_total_cents", "tax_cents", "removed", "special_instructions",
+                  "unit_price_cents", "line_total_cents", "discount_cents", "tax_cents", "removed", "special_instructions",
                   "prep_category", "external_item_id", "is_mapped", "modifiers"]
 
 
@@ -89,7 +94,8 @@ class OrderEventSerializer(serializers.ModelSerializer):
 class OrderDiscountSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrderDiscount
-        fields = ["id", "code", "name", "amount_cents", "applied_by", "authorized_by", "created_at"]
+        fields = ["id", "promotion", "code", "name", "amount_cents", "allocation", "applied_by", "authorized_by",
+                  "created_at"]
 
 
 class OrderSerializer(serializers.ModelSerializer):
@@ -185,7 +191,8 @@ class CancelSerializer(serializers.Serializer):
 
 
 class DiscountApplySerializer(serializers.Serializer):
-    discount_code = serializers.CharField(required=False)
+    discount_code = serializers.CharField(required=False, help_text="Promotion / coupon code")
+    promotion_id = serializers.IntegerField(required=False, help_text="Manually selectable promotion")
     amount_cents = serializers.IntegerField(required=False, min_value=1, help_text="Open (manual) discount amount")
     reason = serializers.CharField(required=False, allow_blank=True, default="")
     manager_code = serializers.CharField(required=False, allow_blank=True)

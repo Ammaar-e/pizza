@@ -81,3 +81,22 @@ def _clear_cache():
 
     cache.clear()
     yield
+
+
+def register_device(api, username="manager.1001", store_number="1001", device_type="pos", name="Front 1",
+                    approver="owner.a"):
+    """Register a device as a store manager (pending) and approve it as the franchise owner."""
+    from apps.organization.models import Store
+
+    api.credentials()
+    login(api, username, store_number=store_number)
+    store = Store.objects.get(number=store_number)
+    r = api.post("/api/v1/devices/", {"store": store.id, "device_type": device_type, "name": name}, format="json")
+    assert r.status_code == 201, r.content
+    token, dev_id = r.json()["device_token"], r.json()["id"]
+    if r.json()["status"] == "pending" and approver:
+        api.credentials()
+        login(api, approver)
+        assert api.post(f"/api/v1/devices/{dev_id}/approve/", {}, format="json").status_code == 200
+    api.credentials()
+    return token, dev_id

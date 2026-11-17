@@ -64,6 +64,9 @@ INSTALLED_APPS = [
     "apps.integrations",
     "apps.reporting",
     "apps.api",
+    "apps.devices",
+    "apps.promotions",
+    "apps.dispatch",
 ]
 
 MIDDLEWARE = [
@@ -169,6 +172,18 @@ CELERY_BEAT_SCHEDULE = {
     "retry-failed-webhook-events": {
         "task": "apps.integrations.tasks.retry_failed_webhook_events",
         "schedule": 120.0,
+    },
+    "device-heartbeat-monitor": {
+        "task": "apps.devices.tasks.monitor_device_heartbeats",
+        "schedule": 60.0,
+    },
+    "device-heartbeat-prune": {
+        "task": "apps.devices.tasks.prune_device_heartbeats",
+        "schedule": 3600.0,
+    },
+    "promotion-status-refresh": {
+        "task": "apps.promotions.tasks.refresh_promotion_statuses",
+        "schedule": 60.0,
     },
     "retry-outbound-webhooks": {
         "task": "apps.api.tasks.retry_outbound_webhooks",

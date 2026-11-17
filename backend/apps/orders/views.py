@@ -14,7 +14,6 @@ from rest_framework.views import APIView
 
 from apps.accounts.permissions import IsStaffUser
 from apps.accounts.services import authorize_manager, user_can_operate_store
-from apps.catalog.models import Discount
 from apps.core.audit import audit
 from apps.core.exceptions import ConflictError, DomainError
 from apps.core.tenancy import accessible_store_ids
@@ -97,9 +96,13 @@ def build_normalized(data: dict, source: str) -> NormalizedOrder:
         payment=NormalizedPayment(status=pay.get("status", "unpaid"), amount_cents=pay.get("amount_cents", 0),
                                   reference=pay.get("reference", "")),
         entry_channel=data.get("entry_channel", ""),
+        promo_codes=list(data.get("promo_codes") or []),
+        promotion_ids=list(data.get("promotion_ids") or []),
+        manager_code=data.get("manager_code") or "",
         offline_client_ref=data.get("offline_client_ref", ""),
         is_offline_origin=bool(data.get("offline_client_ref")),
-        raw={k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in data.items() if k != "payment"},
+        raw={k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in data.items()
+             if k not in ("payment", "manager_code")},
     )
 
 
@@ -354,6 +357,10 @@ class OrderViewSet(ContextMixin, viewsets.GenericViewSet):
     @extend_schema(request=DiscountApplySerializer, responses=OrderSerializer)
     @action(detail=True, methods=["post"])
     def discounts(self, request, pk=None):
+        """Apply a promotion code, a manually selectable promotion, or an open (manual) discount.
+        All promotions on the order are re-validated and taxes/totals recalculated server-side."""
+        from apps.promotions.services import apply_promotions
+
         order = self.get_object()
         s = DiscountApplySerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -364,47 +371,47 @@ class OrderViewSet(ContextMixin, viewsets.GenericViewSet):
             raise ConflictError("Order is closed", code="order_closed")
         if order.payment_status not in ("unpaid",):
             raise ConflictError("Apply discounts before taking payment", code="payment_started")
+        from apps.devices.services import feature_enabled
+
+        device = getattr(request, "device", None)
+        if d.get("discount_code") or d.get("promotion_id"):
+            if not (request.user.has_permission("promotions.apply_code") or
+                    request.user.has_permission("orders.apply_discount")):
+                raise PermissionDenied()
+            if not feature_enabled(device, "coupon_entry"):
+                raise DomainError("Coupon entry is disabled on this device", code="feature_disabled", status_code=403)
+            with transaction.atomic():
+                o = Order.objects.select_for_update().get(pk=order.pk)
+                ev = apply_promotions(o, codes=[d["discount_code"]] if d.get("discount_code") else [],
+                                      promotion_ids=[d["promotion_id"]] if d.get("promotion_id") else [],
+                                      user=request.user, manager_code=d.get("manager_code"))
+            log_event(order, "promotion", "Promotions re-evaluated", {"applied": [a.as_dict() for a in ev.applied]},
+                      request.user)
+            body = self._out(order)
+            body["promotions"] = ev.as_dict()
+            return Response(body)
+        if not d.get("amount_cents"):
+            raise ValidationError("discount_code, promotion_id or amount_cents required")
         if not request.user.has_permission("orders.apply_discount"):
             raise PermissionDenied()
-        disc, needs_mgr = None, True
-        if d.get("discount_code"):
-            disc = Discount.objects.filter(Q(franchisee__isnull=True) | Q(franchisee=order.franchisee),
-                                           code=d["discount_code"], is_active=True).first()
-            if disc is None:
-                raise ValidationError({"discount_code": "Unknown discount"})
-            amount = (order.subtotal_cents * disc.value // 10000) if disc.discount_type == "percent" else disc.value
-            if disc.max_amount_cents:
-                amount = min(amount, disc.max_amount_cents)
-            needs_mgr = disc.requires_manager
-        elif d.get("amount_cents"):
-            amount = d["amount_cents"]
-        else:
-            raise ValidationError("discount_code or amount_cents required")
-        amount = min(amount, order.subtotal_cents - order.discount_cents)
-        if amount <= 0:
-            raise ValidationError("Nothing to discount")
-        mgr = authorize_manager(order.store, d.get("manager_code"), "orders.apply_discount",
-                                request.user) if needs_mgr else None
+        if not feature_enabled(device, "discounts"):
+            raise DomainError("Manual discounts are disabled on this device", code="feature_disabled",
+                              status_code=403)
+        # Open (manual) discounts always need a manager.
+        mgr = authorize_manager(order.store, d.get("manager_code"), "orders.apply_discount", request.user)
         hq_policy = order.store.franchisee.headquarters.policies or {}
         max_pct = hq_policy.get("max_discount_percent")
-        if max_pct is not None and (order.discount_cents + amount) * 100 > order.subtotal_cents * int(max_pct):
-            raise DomainError(f"Discount exceeds company policy maximum of {max_pct}%", code="discount_policy")
         with transaction.atomic():
             o = Order.objects.select_for_update().get(pk=order.pk)
-            OrderDiscount.objects.create(order=o, discount=disc, code=disc.code if disc else "MANUAL",
-                                         name=disc.name if disc else (d.get("reason") or "Manual discount"),
+            amount = min(d["amount_cents"], o.subtotal_cents - o.discount_cents)
+            if amount <= 0:
+                raise ValidationError("Nothing to discount")
+            if max_pct is not None and (o.discount_cents + amount) * 100 > o.subtotal_cents * int(max_pct):
+                raise DomainError(f"Discount exceeds company policy maximum of {max_pct}%", code="discount_policy")
+            OrderDiscount.objects.create(order=o, code="MANUAL", name=d.get("reason") or "Manual discount",
                                          amount_cents=amount, applied_by=request.user, authorized_by=mgr)
-            old_base = o.subtotal_cents - o.discount_cents
-            o.discount_cents += amount
-            new_base = o.subtotal_cents - o.discount_cents
-            # Tax is recomputed proportionally on the discounted item subtotal.
-            item_tax = sum(i.tax_cents for i in o.items.all())
-            new_item_tax = round(item_tax * new_base / o.subtotal_cents) if o.subtotal_cents else 0
-            charges_tax = o.tax_cents - round(item_tax * old_base / o.subtotal_cents) if o.subtotal_cents else 0
-            o.tax_cents = new_item_tax + max(charges_tax, 0)
-            o.total_cents = new_base + o.charges_cents + o.tax_cents + o.tip_cents
-            o.save()
-        log_event(order, "discount", f"Discount {amount} applied", {"amount_cents": amount}, request.user)
+            apply_promotions(o, user=request.user)
+        log_event(order, "discount", f"Manual discount {amount} applied", {"amount_cents": amount}, request.user)
         audit("order.discount", order, authorized_by=mgr, data={"amount_cents": amount, "reason": d.get("reason")})
         return Response(self._out(order))
 

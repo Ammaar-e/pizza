@@ -52,3 +52,59 @@ class POSFeedConsumer(StoreFeedConsumer):
 class KDSFeedConsumer(StoreFeedConsumer):
     kind = "kds"
     required_permission = "kitchen.access"
+
+
+class DispatchFeedConsumer(StoreFeedConsumer):
+    kind = "dispatch"
+    required_permission = "dispatch.view"
+
+
+class _ScopedGroupsConsumer(AsyncJsonWebsocketConsumer):
+    """Base for feeds whose groups depend on the user's scope rather than one store."""
+
+    async def connect(self):
+        user = self.scope.get("user")
+        groups = await self._groups(user) if user and user.is_authenticated else None
+        if not groups:
+            await self.close(code=4403)
+            return
+        self.groups_joined = groups
+        for g in groups:
+            await self.channel_layer.group_add(g, self.channel_name)
+        await self.accept()
+        await self.send_json({"event": "connected"})
+
+    async def disconnect(self, code):
+        for g in getattr(self, "groups_joined", []):
+            await self.channel_layer.group_discard(g, self.channel_name)
+
+    async def receive_json(self, content, **kwargs):
+        if content.get("type") == "ping":
+            await self.send_json({"event": "pong"})
+
+    async def push(self, event):
+        await self.send_json(event["payload"])
+
+
+class DriverFeedConsumer(_ScopedGroupsConsumer):
+    """A driver only ever receives events about deliveries assigned to them."""
+
+    @database_sync_to_async
+    def _groups(self, user):
+        return [f"driver_{user.pk}"] if user.has_permission("delivery.access") else None
+
+
+class DevicesFeedConsumer(_ScopedGroupsConsumer):
+    """Device status/alerts for the device dashboard, limited to the user's scope."""
+
+    @database_sync_to_async
+    def _groups(self, user):
+        from apps.core.tenancy import accessible_franchisee_ids, accessible_store_ids, is_hq
+
+        if not (user.has_permission("devices.view") or user.has_permission("org.manage_devices")):
+            return None
+        if is_hq(user):
+            return ["devices_all"]
+        if user.is_franchise_level and user.franchisee_id:
+            return [f"devices_franchisee_{f}" for f in accessible_franchisee_ids(user) or []]
+        return [f"devices_store_{s}" for s in accessible_store_ids(user) or []]

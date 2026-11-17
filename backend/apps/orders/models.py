@@ -177,6 +177,8 @@ class OrderItem(models.Model):
     unit_price_cents = models.IntegerField(default=0)
     line_total_cents = models.IntegerField(default=0)
     tax_cents = models.IntegerField(default=0)
+    tax_breakdown = models.JSONField(default=dict, blank=True)
+    discount_cents = models.IntegerField(default=0, help_text="Promotion/manual discount allocated to this line")
     removed = models.JSONField(default=list, blank=True)
     special_instructions = models.TextField(blank=True)
     prep_category = models.CharField(max_length=30, blank=True)
@@ -202,7 +204,11 @@ class OrderItemModifier(models.Model):
 
 class OrderDiscount(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="discounts")
-    discount = models.ForeignKey("catalog.Discount", null=True, blank=True, on_delete=models.SET_NULL)
+    promotion = models.ForeignKey("promotions.Promotion", null=True, blank=True, on_delete=models.PROTECT,
+                                  related_name="order_discounts", help_text="Null = manual (open) discount")
+    redemption = models.OneToOneField("promotions.PromotionRedemption", null=True, blank=True,
+                                      on_delete=models.SET_NULL, related_name="order_discount")
+    allocation = models.JSONField(default=dict, blank=True, help_text="{order_item_id: cents}")
     code = models.CharField(max_length=30, blank=True)
     name = models.CharField(max_length=100)
     amount_cents = models.IntegerField()

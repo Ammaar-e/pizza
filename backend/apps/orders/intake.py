@@ -112,12 +112,16 @@ class NormalizedOrder:
     provider_ack_deadline: datetime | None = None
     is_offline_origin: bool = False
     entry_channel: str = ""
+    promo_codes: list[str] = field(default_factory=list)
+    promotion_ids: list[int] = field(default_factory=list)
+    manager_code: str = ""
     offline_client_ref: str = ""
     raw: dict = field(default_factory=dict)
 
     def fingerprint(self) -> str:
         data = asdict(self)
         data.pop("raw", None)
+        data.pop("manager_code", None)
         data.pop("provider_ack_deadline", None)
         return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -312,13 +316,22 @@ class OrderIntakeService:
                 for k, v in pl.tax_breakdown.items():
                     tax_breakdown[k] = tax_breakdown.get(k, 0) + v
 
-        charges = [] if is_provider else applicable_charges(store, norm.order_type)
+        delivery_resolution = None
+        if norm.order_type == OrderType.DELIVERY and not is_provider:
+            from apps.dispatch.services import resolve_delivery
+
+            delivery_resolution = resolve_delivery(store, norm.delivery_address, subtotal)
+        charges = [] if is_provider else applicable_charges(
+            store, norm.order_type,
+            delivery_fee_cents=delivery_resolution["fee_cents"] if delivery_resolution else None)
         charges_total = 0
         for ch in charges:
             charges_total += ch["amount_cents"]
+            ch["tax_cents"], ch["tax_breakdown"] = 0, {}
             if ch.get("tax_category_id"):
                 t, bd = compute_tax(ch["amount_cents"], tax_rates_for(store, ch["tax_category_id"]))
                 tax_total += t
+                ch["tax_cents"], ch["tax_breakdown"] = t, bd
                 for k, v in bd.items():
                     tax_breakdown[k] = tax_breakdown.get(k, 0) + v
             ch.pop("tax_category_id", None)
@@ -337,12 +350,6 @@ class OrderIntakeService:
             charges_total = int(pt.get("fees_cents", 0))
             total = int(pt.get("total_cents", subtotal + tax_total + norm.tip_cents))
 
-        if norm.expected_total_cents is not None and not is_provider and norm.expected_total_cents != total:
-            # Raised inside the persistence transaction, so nothing is written.
-            raise DomainError("Submitted total does not match the calculated price", code="price_mismatch",
-                              errors=[{"code": "price_mismatch", "message": f"Submitted total "
-                                       f"{norm.expected_total_cents} does not match calculated total {total}",
-                                       "ref": None, "calculated_total_cents": total}])
 
         payment_status = PaymentStatus.UNPAID
         if norm.payment.status == "provider_paid" or is_provider:
@@ -407,7 +414,8 @@ class OrderIntakeService:
                 size_code=pl.size.code if pl.size else "", size_name=pl.size.name if pl.size else "",
                 crust_code=pl.crust.code if pl.crust else "", crust_name=pl.crust.name if pl.crust else "",
                 quantity=pl.quantity, unit_price_cents=pl.unit_price_cents, line_total_cents=pl.line_total_cents,
-                tax_cents=pl.tax_cents, removed=[{"code": m.code, "name": m.name} for m in pl.removed],
+                tax_cents=pl.tax_cents, tax_breakdown=pl.tax_breakdown,
+                removed=[{"code": m.code, "name": m.name} for m in pl.removed],
                 special_instructions=pl.special_instructions, prep_category=pl.product.prep_category.code,
                 external_item_id=item.external_id or "",
             )
@@ -419,6 +427,24 @@ class OrderIntakeService:
                                   external_id=ext_by_code.get(m.modifier.code) or "")
                 for m in pl.modifiers
             ])
+        if not is_provider:
+            from apps.promotions.services import apply_promotions
+
+            # Server-side promotion evaluation (auto promotions + entered codes) and tax recalculation.
+            apply_promotions(order, codes=norm.promo_codes, promotion_ids=norm.promotion_ids, user=self.actor,
+                             manager_code=norm.manager_code)
+            order.refresh_from_db()
+            if norm.expected_total_cents is not None and norm.expected_total_cents != order.total_cents:
+                # Raised inside the persistence transaction, so nothing is written.
+                raise DomainError("Submitted total does not match the calculated price", code="price_mismatch",
+                                  errors=[{"code": "price_mismatch", "message": f"Submitted total "
+                                           f"{norm.expected_total_cents} does not match calculated total "
+                                           f"{order.total_cents}", "ref": None,
+                                           "calculated_total_cents": order.total_cents}])
+            if delivery_resolution is not None:
+                from apps.dispatch.services import create_for_order
+
+                create_for_order(order, delivery_resolution)
         log_event(order, "order_received", f"Order received from {order.get_source_display()}",
                   {"issues": issues, "external_order_id": norm.external_order_id}, self.actor,
                   to_status=OrderStatus.RECEIVED)

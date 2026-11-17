@@ -321,14 +321,16 @@ def price_line(store, line: dict, channel: str | None = None, *, check_availabil
     return pl
 
 
-def applicable_charges(store, order_type: str) -> list[dict]:
+def applicable_charges(store, order_type: str, delivery_fee_cents: int | None = None) -> list[dict]:
+    """Order-level charges. The delivery fee comes from the resolved delivery zone when given."""
     out = []
     for ch in AdditionalCharge.objects.filter(is_active=True):
         if ch.applies_to == "all" or ch.applies_to == order_type:
             out.append({"code": ch.code, "name": ch.name, "amount_cents": ch.amount_cents,
                         "tax_category_id": ch.tax_category_id})
     if order_type == "delivery":
-        fee = int((store.delivery_config or {}).get("delivery_fee_cents") or 0)
+        fee = delivery_fee_cents if delivery_fee_cents is not None else int(
+            (store.delivery_config or {}).get("delivery_fee_cents") or 0)
         if fee and not any(c["code"] == "DELIVERY" for c in out):
             out.append({"code": "DELIVERY", "name": "Delivery fee", "amount_cents": fee, "tax_category_id": None})
     return out
