@@ -12,6 +12,7 @@ import PaymentModal from "./PaymentModal";
 import CashDrawer from "./CashDrawer";
 import DispatchBoard from "./DispatchBoard";
 import { featureOn, useDeviceAgent } from "@/lib/device";
+import { CardStatus, native } from "@/lib/native";
 
 const posApi = api("pos");
 type Tab = "order" | "orders" | "delivery" | "dispatch" | "cash" | "availability";
@@ -28,6 +29,16 @@ export default function PosApp() {
     window.addEventListener("pzp-logout-pos", out);
     return () => window.removeEventListener("pzp-logout-pos", out);
   }, []);
+  // Inside the Android/iOS app: tell it which store is signed in (it configures the card reader for that store).
+  useEffect(() => {
+    if (!ready || !native.available) return;
+    const st = session?.store;
+    native.call("hello", {
+      page: "pos",
+      store: st ? { id: st.id, number: st.number, cardProcessor: st.payment_config?.card_processor,
+        bbposUrl: st.payment_config?.bbpos_public_url || st.payment_config?.bbpos_api_url } : null,
+    }).catch(() => undefined);
+  }, [ready, session]);
   if (!ready) return null;
   if (!session?.store)
     return (
@@ -322,6 +333,7 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
         </div>
         <div className="flex items-center gap-4">
           {statusPill}
+          <NativeReaderButton />
           <div className="text-right text-xs"><div className="font-semibold">{session.user.name}</div><div className="text-slate-400">{session.user.role}</div></div>
           <Button variant="secondary" size="sm" onClick={onLogout}>{device ? "Lock" : "Sign out"}</Button>
         </div>
@@ -453,6 +465,27 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
       )}
       {detail && <OrderDetail orderId={detail} can={can} onClose={() => { setDetail(null); loadOrders(); }} />}
     </div>
+  );
+}
+
+/** Shown only in the POS app: card reader status; opens the app's WisePad 3 / bbpos panel. */
+function NativeReaderButton() {
+  const [status, setStatus] = useState<CardStatus | null>(null);
+  useEffect(() => {
+    if (!native.available) return;
+    native.call<CardStatus>("card.status").then(setStatus).catch(() => undefined);
+    return native.on("card.status", setStatus);
+  }, []);
+  if (!native.available) return null;
+  const ok = status?.ready;
+  return (
+    <button onClick={() => native.call("app.openReader").catch(() => undefined)}
+      className={cx("flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-2 text-xs font-semibold", ok ? "bg-white/10" : "bg-amber-500/30")}
+      title={status?.problem ?? status?.reader?.label ?? "Card reader"}>
+      <span className={cx("h-2 w-2 rounded-full", ok ? "bg-emerald-400" : "bg-amber-400")} />
+      Reader{status?.reader?.batteryPercent != null ? ` ${status.reader.batteryPercent}%` : ""}
+      {!!status?.pendingRecords && <span className="rounded-full bg-red-500 px-1.5 text-white">{status.pendingRecords}</span>}
+    </button>
   );
 }
 
