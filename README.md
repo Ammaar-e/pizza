@@ -3,7 +3,9 @@
 An internal, centralized restaurant operations platform for a pizza franchise network:
 headquarters administration, franchisee and multi-store management, a touch POS (PWA with offline
 queue), a real-time Kitchen Display System, a central order intake engine, delivery-provider
-integrations, a versioned external/call-centre API, payments, reporting and a full audit trail.
+integrations, a versioned external/call-centre API, payments, reporting and a full audit trail —
+plus cash management & shift closing, a promotions engine, in-house delivery dispatch with a driver
+app, and centralized device management (see [`docs/MODULES.md`](docs/MODULES.md)).
 It is **not** a customer-facing ordering site.
 
 | Interface | Path | Who |
@@ -12,6 +14,7 @@ It is **not** a customer-facing ordering site.
 | Franchise portal | `/franchise` | Franchisee owners/managers |
 | Restaurant POS | `/pos` | Store managers, supervisors, cashiers, drivers |
 | Kitchen display | `/kds` | Kitchen staff |
+| Driver app (mobile) | `/driver` | Delivery drivers |
 | API docs | `/api/v1/docs/` | Integrators |
 
 ## Stack
@@ -23,7 +26,7 @@ TypeScript / Tailwind · Nginx · Docker Compose on Ubuntu EC2 (database on EC2,
 
 ```
 backend/            Django modular monolith (apps: core, organization, accounts, catalog, orders,
-                    payments, kitchen, integrations, api, reporting) + tests
+                    payments, kitchen, integrations, api, reporting, promotions, dispatch, devices) + tests
 frontend/           Next.js app: HQ & franchise portals, POS PWA, KDS
 deploy/             docker-compose (single EC2 / two EC2), nginx, postgres config, backup & restore scripts
 docs/               ARCHITECTURE, API, DEPLOYMENT, integrations/ (Uber Eats, DoorDash, Skip research)
@@ -65,14 +68,20 @@ stations (oven, fryer, expo).
 | `manager.<store>` | Store manager | POS; PIN `1111`, manager code `1234` |
 | `cashier.<store>` | Cashier | POS; PIN `2222` |
 | `kitchen.<store>` | Kitchen | KDS; PIN `3333` |
-| `driver.<store>` | Delivery | PIN `4444` |
+| `driver.<store>` | Delivery driver | PIN `4444`; driver app at `/driver` |
 
 All demo users share the password given to `seed_demo`. Demo data is for demonstrations only.
+
+The seed also creates promotions (codes `STAFF10` (manager approval), `PROMO5`, `TOPPINGS2`; automatic
+"free garlic bread with a large pizza" and "wings & cola $14.99" deals; a scheduled weekend BOGO),
+franchise promotion policies, driver profiles, delivery zones for store 1002, auto-dispatch on store 1001,
+and device configuration profiles. Devices registered by store managers need approval by the
+franchise owner or HQ (portal → **Devices**), or enroll with a one-time code.
 
 ## Tests
 
 ```bash
-cd backend && python -m pytest          # 44 tests
+cd backend && python -m pytest          # 82 tests
 cd frontend && npx tsc --noEmit && npm run build
 ```
 
@@ -81,7 +90,13 @@ idempotency keys, **duplicate webhook handling** (redelivery, concurrent races, 
 DoorDash/Uber webhook authentication and acknowledgement calls, acceptance policies and the
 provider-deadline sweeper, **tenant isolation** (franchisees, store employees, API clients,
 secrets), **payment state transitions** (cash sessions, split payments, partial/full refunds with
-manager authorization, provider-paid orders), offline sync idempotency, the KDS flow and OpenAPI generation.
+manager authorization, provider-paid orders), offline sync idempotency, the KDS flow and OpenAPI generation;
+and for the operations modules: separate registers per employee, shortage/overage reconciliation with
+explanations and approvals, immutable closed sessions and post-close corrections, transfers, duplicate
+requests; overlapping, expired, stacked, limited and customer-specific promotions with tax recalculation
+and franchise isolation; zone/fee validation, assignment/reassignment, capacity, auto-assignment, failed
+deliveries, proof of delivery and driver-only access; device approval, enrollment codes, revoked/rotated
+credentials, auth-failure alerts, server-side heartbeat timeouts, outdated versions and config versioning.
 
 ## Integrations status
 

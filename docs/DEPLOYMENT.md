@@ -85,5 +85,9 @@ git pull && cd deploy && docker compose up -d --build   # migrate runs before ba
 * Logs: `docker compose logs -f backend worker`. Production logs are JSON with secrets redacted.
   Integration errors are also stored in the database (portal → integrations → error history) and in
   the HQ **Delivery providers** monitor (with retry).
-* Celery beat runs the provider-deadline sweeper every 60 s, failed-webhook retries every 2 min and
-  outbound API-client webhook retries every 60 s.
+* Celery beat runs the provider-deadline sweeper every 60 s, failed-webhook retries every 2 min,
+  outbound API-client webhook retries every 60 s, device heartbeat-timeout detection every 60 s,
+  promotion schedule activation/expiry every 60 s and hourly heartbeat pruning.
+* Recommended production HQ policies (`PATCH /api/v1/headquarters/`, `policies`):
+  `require_registered_device_for_pos: true`, `devices_require_approval: true`,
+  `cash_variance_threshold_cents`, `device_offline_after_seconds`, `device_credential_lifetime_days`.

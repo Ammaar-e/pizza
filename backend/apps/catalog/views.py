@@ -163,6 +163,7 @@ class StoreMenuConfigView(ContextMixin, APIView):
 
     permission_classes = [IsStaffUser]
 
+    @extend_schema(responses=dict)
     def get(self, request, store_id):
         store = _store_for(request, store_id)
         existing = {sp.product_id: sp for sp in m.StoreProduct.objects.filter(store=store).select_related(
@@ -235,6 +236,7 @@ class PublishMenuView(ContextMixin, APIView):
 
     permission_classes = [IsStaffUser]
 
+    @extend_schema(request=dict, responses=dict)
     def post(self, request, store_id):
         from .engine import build_store_menu
 
@@ -244,6 +246,7 @@ class PublishMenuView(ContextMixin, APIView):
         audit("menu.publish", store, data={"version": v.version})
         return Response({"version": v.version, "created_at": v.created_at})
 
+    @extend_schema(responses=dict)
     def get(self, request, store_id):
         store = _store_for(request, store_id)
         qs = m.CatalogVersion.objects.filter(kind=m.CatalogVersion.KIND_MENU, entity_id=str(store.pk))[:50]

@@ -150,12 +150,12 @@ class CashSessionViewSet(ContextMixin, viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=["get"])
     def current(self, request):
-        """Open session on this device's register, else the caller's own open session."""
+        """Open session on this device's register (on a terminal), else the caller's own open session."""
         device = getattr(request, "device", None)
-        s = None
         if device is not None:
+            # On a terminal, only that terminal's register is "current".
             s = CashSession.objects.filter(register__device=device, status=CashSession.STATUS_OPEN).first()
-        if s is None:
+        else:
             s = CashSession.objects.filter(employee=request.user, status=CashSession.STATUS_OPEN).first()
         return Response(self._ser(s) if s else None)
 

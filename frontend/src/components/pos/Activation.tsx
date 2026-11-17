@@ -1,12 +1,13 @@
 "use client";
 import { useState } from "react";
 import { Button, ErrorBanner, Field, Input, Notice } from "@/components/ui";
-import { ApiError, DEVICE_KEY, Namespace, Session, api, deviceInfo, saveSession } from "@/lib/api";
+import { ApiError, DEVICE_KEY, Namespace, Session, api, deviceInfo, pendingDevice, saveSession } from "@/lib/api";
+import { APP_VERSION } from "@/lib/device";
 
 /** POS / KDS activation: store number + employee username + password (or PIN on a registered device). */
 export default function Activation({ ns, title, deviceType, onReady }: { ns: Namespace; title: string; deviceType: "pos" | "kds"; onReady: (s: Session) => void }) {
   const dev = deviceInfo();
-  const [storeNumber, setStoreNumber] = useState(dev ? String(dev.store_number ?? "") : "");
+  const [storeNumber, setStoreNumber] = useState(String((dev ?? pendingDevice())?.store_number ?? ""));
   const [username, setUsername] = useState("");
   const [secret, setSecret] = useState("");
   const [usePin, setUsePin] = useState(!!dev);
@@ -14,6 +15,41 @@ export default function Activation({ ns, title, deviceType, onReady }: { ns: Nam
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<Session | null>(null);
   const [deviceName, setDeviceName] = useState(deviceType === "pos" ? "Front counter" : "Kitchen screen");
+  const [enrolling, setEnrolling] = useState(false);
+  const [code, setCode] = useState("");
+  const [waiting, setWaiting] = useState(pendingDevice());
+
+  async function checkApproval() {
+    const p = pendingDevice();
+    if (!p) return;
+    const r = await fetch("/api/v1/device-auth/me/", { headers: { "X-Device-Token": p.token } });
+    const body = await r.json().catch(() => ({}));
+    if (r.ok && body.status === "active") {
+      localStorage.setItem(DEVICE_KEY, JSON.stringify({ ...p, pending: false }));
+      setStoreNumber(String(p.store_number ?? ""));
+      setUsePin(true);
+      setWaiting(null);
+      setError(null);
+    } else if (!r.ok) {
+      localStorage.removeItem(DEVICE_KEY);
+      setWaiting(null);
+      setError(body?.error?.message || "Registration was rejected");
+    } else setError("Still awaiting approval by an authorized manager or headquarters.");
+  }
+
+  async function enroll() {
+    setError(null);
+    try {
+      const r = await api(ns).raw<any>("/device-auth/enroll/", { method: "POST", auth: false,
+        body: { store_number: storeNumber.trim(), enrollment_code: code.trim(), software_version: APP_VERSION } });
+      localStorage.setItem(DEVICE_KEY, JSON.stringify({ token: r.device_token, id: r.device.id, name: r.device.name,
+        store: r.device.store, store_number: r.device.store_number, type: r.device.device_type }));
+      setEnrolling(false);
+      setUsePin(true);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.describe() : String(err));
+    }
+  }
 
   async function login(e: React.FormEvent) {
     e.preventDefault();
@@ -41,7 +77,15 @@ export default function Activation({ ns, title, deviceType, onReady }: { ns: Nam
     setError(null);
     try {
       const d = await api(ns).post("/devices/", { store: pending.store!.id, device_type: deviceType, name: deviceName });
-      localStorage.setItem(DEVICE_KEY, JSON.stringify({ token: d.device_token, id: d.id, name: d.name, store: pending.store!.id, store_number: pending.store!.number, type: deviceType }));
+      const info = { token: d.device_token, id: d.id, name: d.name, store: pending.store!.id, store_number: pending.store!.number, type: deviceType, pending: d.status === "pending" };
+      localStorage.setItem(DEVICE_KEY, JSON.stringify(info));
+      if (info.pending) {
+        setWaiting(info);
+        setPending(null);
+        setError("Device registered and awaiting approval. You can continue in limited mode meanwhile.");
+        onReady(pending);
+        return;
+      }
       onReady(pending);
     } catch (err) {
       setError(err instanceof ApiError ? err.describe() : String(err));
@@ -68,6 +112,20 @@ export default function Activation({ ns, title, deviceType, onReady }: { ns: Nam
     );
   }
 
+  if (enrolling) {
+    return (
+      <div className="w-full max-w-md space-y-4 rounded-2xl bg-white p-8 shadow-lg">
+        <h1 className="text-2xl font-bold">Enroll this device</h1>
+        <p className="text-sm text-slate-600">Enter the store number and the one-time enrollment code issued by headquarters or your franchise office.</p>
+        <ErrorBanner error={error} />
+        <Field label="Store number"><Input className="touch-target text-lg" value={storeNumber} onChange={(e) => setStoreNumber(e.target.value)} /></Field>
+        <Field label="Enrollment code"><Input className="touch-target text-lg uppercase" value={code} onChange={(e) => setCode(e.target.value)} placeholder="XXXXX-XXXXX" /></Field>
+        <Button size="xl" className="w-full" onClick={enroll} disabled={!storeNumber || !code}>Enroll</Button>
+        <Button variant="ghost" className="w-full" onClick={() => setEnrolling(false)}>Back to sign in</Button>
+      </div>
+    );
+  }
+
   return (
     <form onSubmit={login} className="w-full max-w-md space-y-5 rounded-2xl bg-white p-8 shadow-lg">
       <div>
@@ -82,6 +140,8 @@ export default function Activation({ ns, title, deviceType, onReady }: { ns: Nam
         <Input className="touch-target text-lg" type="password" inputMode={usePin ? "numeric" : undefined} value={secret} onChange={(e) => setSecret(e.target.value)} required />
       </Field>
       {dev && <button type="button" className="text-sm text-brand-600 underline" onClick={() => setUsePin(!usePin)}>Use {usePin ? "password" : "PIN"} instead</button>}
+      {waiting && <Notice tone="warn">Device “{waiting.name}” is awaiting approval. <button type="button" className="underline" onClick={checkApproval}>Check status</button></Notice>}
+      {!dev && !waiting && <button type="button" className="block text-sm text-brand-600 underline" onClick={() => setEnrolling(true)}>Enroll this device with a code</button>}
       <Button size="xl" className="w-full" disabled={busy}>{busy ? "Validating…" : "Sign in"}</Button>
     </form>
   );

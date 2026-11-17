@@ -142,6 +142,7 @@ class POSLoginView(ContextMixin, APIView):
 class MeView(APIView):
     permission_classes = [IsStaffUser]
 
+    @extend_schema(responses=dict)
     def get(self, request):
         return Response(profile(request.user))
 
