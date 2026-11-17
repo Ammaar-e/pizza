@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -80,7 +80,12 @@ def take_payment(order: Order, *, method: str, amount_cents: int, user, tendered
         if existing:
             if existing.order_id != order.pk:
                 raise ConflictError("Idempotency key belongs to another order", code="idempotency_key_reused")
-            return existing
+            if not (existing.processor == "bbpos" and existing.status == PaymentState.FAILED):
+                return existing
+            # A failed bbpos verification (e.g. bbpos briefly unreachable) may be retried: verification is
+            # read-only on bbpos's side, so release the key and verify again.
+            existing.idempotency_key = None
+            existing.save(update_fields=["idempotency_key"])
     outstanding = order.total_cents - sum(
         p.net_amount_cents for p in order.payments.filter(status__in=Payment.SETTLED_STATUSES))
     if amount_cents > outstanding:
@@ -97,14 +102,28 @@ def take_payment(order: Order, *, method: str, amount_cents: int, user, tendered
             raise DomainError("Cash handling is disabled on this device", code="feature_disabled", status_code=403)
 
     processor = processor_for(method, order.store)
-    with transaction.atomic():
-        payment = Payment.objects.create(
-            order=order, store=order.store, method=method, processor=processor.name, amount_cents=amount_cents,
-            tip_cents=tip_cents, tendered_cents=tendered_cents, cash_session=session, created_by=user,
-            idempotency_key=idempotency_key,
-        )
+    if processor.name == "bbpos":
+        if not reference:
+            raise DomainError("bbpos transaction id (reference) is required", code="reference_required",
+                              status_code=400)
+        if Payment.objects.filter(processor="bbpos", processor_reference=reference).exclude(
+                status=PaymentState.FAILED).exists():
+            raise ConflictError("This card transaction is already recorded on an order", code="reference_reused")
+    try:
+        with transaction.atomic():
+            payment = Payment.objects.create(
+                order=order, store=order.store, method=method, processor=processor.name, amount_cents=amount_cents,
+                tip_cents=tip_cents, tendered_cents=tendered_cents, cash_session=session, created_by=user,
+                idempotency_key=idempotency_key, processor_reference=reference if processor.name == "bbpos" else "",
+            )
+    except IntegrityError:
+        existing = Payment.objects.filter(idempotency_key=idempotency_key).first() if idempotency_key else None
+        if existing and existing.order_id == order.pk:
+            return existing
+        raise ConflictError("This card transaction is already recorded on an order", code="reference_reused")
     try:
         result = processor.charge(amount_cents=amount_cents, tendered_cents=tendered_cents, reference=reference,
+                                  tip_cents=tip_cents,
                                   currency=order.currency, idempotency_key=str(payment.pk), order_ref=str(order.pk))
     except ProcessorNotConfigured as e:
         result_status, reason = PaymentState.FAILED, str(e)

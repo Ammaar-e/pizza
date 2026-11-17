@@ -255,6 +255,12 @@ class Payment(TimeStampedModel):
     class Meta:
         ordering = ["created_at"]
         indexes = [models.Index(fields=["store", "created_at"]), models.Index(fields=["method", "status"])]
+        constraints = [
+            # One external card transaction (bbpos) can settle at most one payment.
+            models.UniqueConstraint(fields=["processor", "processor_reference"],
+                                    condition=models.Q(processor="bbpos") & ~models.Q(status="failed"),
+                                    name="uniq_bbpos_transaction"),
+        ]
 
     @property
     def net_amount_cents(self) -> int:

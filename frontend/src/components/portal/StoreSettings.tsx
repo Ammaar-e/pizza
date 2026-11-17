@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { portalApi } from "@/components/PortalShell";
-import { Badge, Button, Card, ErrorBanner, Field, Input, Notice, Table, Toggle } from "@/components/ui";
+import { Badge, Button, Card, ErrorBanner, Field, Input, Notice, Select, Table, Toggle } from "@/components/ui";
 import { ApiError, Store } from "@/lib/api";
 import { DAYS, money } from "@/lib/format";
 import { useStores } from "./useStores";
@@ -121,12 +121,36 @@ function StoreEditor({ store, onSaved }: { store: Store; onSaved: () => void }) 
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-sm"><Toggle checked={s.pickup_config?.enabled !== false} onChange={(v) => set("pickup_config", { ...s.pickup_config, enabled: v })} /> Pickup enabled</div>
             <Field label="Pickup estimate (min)"><Input type="number" value={s.pickup_config?.estimated_minutes ?? 15} onChange={(e) => set("pickup_config", { ...s.pickup_config, estimated_minutes: Number(e.target.value) })} /></Field>
-            <Field label="Card processor" hint="Card-present payments via Stripe Terminal. Secret keys are stored encrypted and never displayed.">
-              <div className="flex gap-2">
-                <Input placeholder="Stripe reader id (tmr_…)" value={s.payment_config?.stripe_reader_id || ""} onChange={(e) => set("payment_config", { ...s.payment_config, card_processor: "stripe", stripe_reader_id: e.target.value })} />
-              </div>
+            <Field label="Card processor" hint="bbpos: the POS tablet app takes cards on a BBPOS WisePad 3 through the bbpos service, and this server verifies every card transaction with bbpos before marking an order paid. Stripe: server-driven Stripe Terminal reader. Secrets are stored encrypted and never displayed.">
+              <Select value={s.payment_config?.card_processor || "stripe"} onChange={(e) => set("payment_config", { ...s.payment_config, card_processor: e.target.value })}>
+                <option value="none">None (cash / online only)</option>
+                <option value="bbpos">bbpos (WisePad 3 via POS tablet app)</option>
+                <option value="stripe">Stripe Terminal (server-driven reader)</option>
+              </Select>
             </Field>
-            <PaymentSecret store={s} />
+            {s.payment_config?.card_processor === "stripe" && (
+              <>
+                <Field label="Stripe reader id">
+                  <Input placeholder="tmr_…" value={s.payment_config?.stripe_reader_id || ""} onChange={(e) => set("payment_config", { ...s.payment_config, stripe_reader_id: e.target.value })} />
+                </Field>
+                <PaymentSecret store={s} fields={[["stripe_secret_key", "Stripe secret key", "sk_live_…"]]} />
+              </>
+            )}
+            {s.payment_config?.card_processor === "bbpos" && (
+              <>
+                <Field label="bbpos API URL (server-to-server)" hint="How this server reaches bbpos, e.g. https://pos-api.example.com">
+                  <Input placeholder="https://pos-api.example.com" value={s.payment_config?.bbpos_api_url || ""} onChange={(e) => set("payment_config", { ...s.payment_config, bbpos_api_url: e.target.value })} />
+                </Field>
+                <Field label="bbpos URL for tablets (optional)" hint="Only if tablets reach bbpos at a different address than this server.">
+                  <Input placeholder="same as above" value={s.payment_config?.bbpos_public_url || ""} onChange={(e) => set("payment_config", { ...s.payment_config, bbpos_public_url: e.target.value })} />
+                </Field>
+                <div className="flex items-center gap-2 text-sm">
+                  <Toggle checked={!!s.payment_config?.bbpos_allow_mock} onChange={(v) => set("payment_config", { ...s.payment_config, bbpos_allow_mock: v })} />
+                  Accept bbpos MOCK transactions (testing only — no money moves; never enable on a live store)
+                </div>
+                <PaymentSecret store={s} fields={[["bbpos_email", "bbpos service account email", "pos-verifier@example.com"], ["bbpos_password", "bbpos service account password", "••••••••"]]} />
+              </>
+            )}
           </div>
         </Card>
       </div>
@@ -136,19 +160,31 @@ function StoreEditor({ store, onSaved }: { store: Store; onSaved: () => void }) 
   );
 }
 
-function PaymentSecret({ store }: { store: Store }) {
-  const [val, setVal] = useState("");
+function PaymentSecret({ store, fields }: { store: Store; fields: [string, string, string][] }) {
+  const [vals, setVals] = useState<Record<string, string>>({});
   const [state, setState] = useState<string[]>(store.payment_secrets_configured || []);
+  const [error, setError] = useState<string | null>(null);
+  const changed = Object.fromEntries(Object.entries(vals).filter(([, v]) => v));
   return (
-    <div className="flex items-end gap-2">
-      <Field label={`Stripe secret key ${state.includes("stripe_secret_key") ? "(configured)" : "(not set)"}`}>
-        <Input type="password" autoComplete="off" value={val} onChange={(e) => setVal(e.target.value)} placeholder="sk_live_…" />
-      </Field>
-      <Button variant="secondary" disabled={!val} onClick={async () => {
-        const r = await portalApi.post(`/stores/${store.id}/payment-secrets/`, { stripe_secret_key: val });
-        setState(r.configured);
-        setVal("");
-      }}>Save</Button>
+    <div className="space-y-2">
+      <ErrorBanner error={error} />
+      <div className="grid gap-2 sm:grid-cols-2">
+        {fields.map(([key, label, placeholder]) => (
+          <Field key={key} label={`${label} ${state.includes(key) ? "(configured)" : "(not set)"}`}>
+            <Input type={key.includes("email") ? "email" : "password"} autoComplete="off" value={vals[key] || ""} onChange={(e) => setVals({ ...vals, [key]: e.target.value })} placeholder={placeholder} />
+          </Field>
+        ))}
+      </div>
+      <Button variant="secondary" disabled={!Object.keys(changed).length} onClick={async () => {
+        setError(null);
+        try {
+          const r = await portalApi.post(`/stores/${store.id}/payment-secrets/`, changed);
+          setState(r.configured);
+          setVals({});
+        } catch (e) {
+          setError(e instanceof ApiError ? e.describe() : String(e));
+        }
+      }}>Save credentials</Button>
     </div>
   );
 }

@@ -1,0 +1,35 @@
+{
+  "cli": { "version": ">= 16.0.0", "appVersionSource": "remote" },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": { "buildType": "apk" },
+      "env": {
+        "EXPO_PUBLIC_PIZZA_API_URL": "http://192.168.1.10:8000",
+        "EXPO_PUBLIC_BBPOS_API_URL": "http://192.168.1.10:4000",
+        "ALLOW_CLEARTEXT": "true"
+      }
+    },
+    "development-simulator": {
+      "extends": "development",
+      "ios": { "simulator": true }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": { "buildType": "apk" },
+      "env": {
+        "EXPO_PUBLIC_PIZZA_API_URL": "https://pos.amrt.ca",
+        "EXPO_PUBLIC_BBPOS_API_URL": "https://pos-api.example.com"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_PIZZA_API_URL": "https://pos.amrt.ca",
+        "EXPO_PUBLIC_BBPOS_API_URL": "https://pos-api.example.com"
+      }
+    }
+  },
+  "submit": { "production": {} }
+}

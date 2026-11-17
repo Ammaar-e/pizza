@@ -81,6 +81,9 @@ git pull && cd deploy && docker compose up -d --build   # migrate runs before ba
 
 ## Operations
 
+* **API down / 502:** `sh deploy/scripts/diagnose.sh` (read-only) and [`deploy/TROUBLESHOOTING.md`](../deploy/TROUBLESHOOTING.md).
+  nginx re-resolves the backend container through Docker DNS, so recreating the backend no longer leaves nginx
+  pointing at a stale address.
 * Health: `GET /healthz/` (checks the database).
 * Logs: `docker compose logs -f backend worker`. Production logs are JSON with secrets redacted.
   Integration errors are also stored in the database (portal → integrations → error history) and in
