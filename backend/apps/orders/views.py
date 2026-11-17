@@ -168,7 +168,14 @@ class OrderViewSet(ContextMixin, viewsets.GenericViewSet):
             qs = qs.filter(status__in=ACTIVE)
         if p.get("attention") == "1":
             qs = qs.filter(requires_attention=True)
-        if p.get("date"):
+        if p.get("date") == "today":
+            # Business date is the store's local date, not the client's or UTC.
+            store_id = p.get("store") or pinned
+            store = Store.objects.filter(pk=store_id).first() if store_id else None
+            if store is None:
+                raise ValidationError({"date": "'today' requires a store"})
+            qs = qs.filter(business_date=store.local_now().date())
+        elif p.get("date"):
             qs = qs.filter(business_date=p["date"])
         if p.get("q"):
             q = p["q"]
@@ -500,12 +507,19 @@ class OfflineSyncView(ContextMixin, APIView):
                 for i, pay in enumerate(entry.get("payments") or []):
                     if pay.get("method") != "cash":
                         continue  # card payments cannot be captured offline
+                    outstanding = order.total_cents - order.amount_paid_cents
+                    amount = int(pay.get("amount_cents") or outstanding)
+                    tendered = int(pay.get("tendered_cents") or amount)
                     try:
-                        take_payment(order, method="cash", amount_cents=int(pay["amount_cents"]), user=request.user,
-                                     tendered_cents=int(pay.get("tendered_cents") or pay["amount_cents"]),
-                                     device=device, idempotency_key=f"{key}:pay:{i}")
+                        if tendered < amount:
+                            raise DomainError(f"Cash tendered offline ({tendered}) is less than the order total "
+                                              f"({amount})", code="offline_cash_short")
+                        take_payment(order, method="cash", amount_cents=amount, user=request.user,
+                                     tendered_cents=tendered, device=device, idempotency_key=f"{key}:pay:{i}")
                     except DomainError as e:
                         log_event(order, "offline_payment_failed", str(e.detail))
+                        Order.objects.filter(pk=order.pk).update(
+                            requires_attention=True, attention_reason=f"Offline payment not applied: {e.detail}"[:300])
                 order.refresh_from_db()
                 results.append({"offline_client_ref": ref, "status": "duplicate" if not result.created else "created",
                                 "order_id": str(order.pk), "order_number": order.order_number,

@@ -145,7 +145,7 @@ def test_offline_sync_is_idempotent(seeded, pos):
     c.post("/api/v1/cash-sessions/open/", {"opening_float_cents": 0}, format="json")
     batch = {"orders": [{"offline_client_ref": "dev1-0001",
                          "order": {"order_type": "pickup", "items": [{"product": "DR-COLA"}]},
-                         "payments": [{"method": "cash", "amount_cents": 338, "tendered_cents": 500}]},
+                         "payments": [{"method": "cash", "tendered_cents": 500}]},
                         {"offline_client_ref": "dev1-0002",
                          "order": {"order_type": "pickup", "items": [{"product": "NOPE"}]}}]}
     r1 = c.post("/api/v1/pos/sync/", batch, format="json").json()["results"]
