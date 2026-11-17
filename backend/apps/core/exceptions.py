@@ -1,6 +1,7 @@
 import logging
 
 from django.db import IntegrityError
+from django.db.models import ProtectedError, RestrictedError
 from rest_framework import status
 from rest_framework.exceptions import APIException
 from rest_framework.response import Response
@@ -41,6 +42,12 @@ def _unhandled(exc, context):
     request = context.get("request")
     request_id = getattr(request, "request_id", None) if request is not None else None
     set_rollback()
+    if isinstance(exc, (ProtectedError, RestrictedError)):
+        used_by = sorted({str(o._meta.verbose_name_plural) for o in list(exc.protected_objects if isinstance(exc, ProtectedError)
+                                                                           else exc.restricted_objects)[:50]})
+        return Response({"error": {"code": "in_use", "message": "This is still used by other records "
+                                   f"({', '.join(used_by)}). Change or remove those first, or mark it inactive.",
+                                   "details": None, "errors": None, "request_id": request_id}}, status=409)
     if isinstance(exc, IntegrityError):
         logger.warning("Integrity error on %s (request %s): %s", getattr(request, "path", "?"), request_id, exc)
         return Response({"error": {"code": "conflict", "message": "This conflicts with existing data "

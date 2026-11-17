@@ -69,6 +69,7 @@ api_v1 = [
     path("headquarters/", org.HeadquartersView.as_view(), name="headquarters"),
     path("network/", org.NetworkSummaryView.as_view(), name="network"),
     path("stores/<int:store_id>/orders/", StoreOrdersView.as_view({"get": "list"}), name="store-orders"),
+    path("catalog/starter-setup/", cat.StarterCatalogView.as_view(), name="catalog-starter-setup"),
     path("stores/<int:store_id>/menu-config/", cat.StoreMenuConfigView.as_view(), name="store-menu-config"),
     path("stores/<int:store_id>/availability/update/", cat.StoreAvailabilityView.as_view(),
          name="store-availability-update"),

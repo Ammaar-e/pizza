@@ -4,6 +4,10 @@ import { portalApi } from "@/components/PortalShell";
 import { Badge, Button, Card, ErrorBanner, Field, Input, Modal, Select, Table, Toggle } from "@/components/ui";
 import { ApiError, results } from "@/lib/api";
 import { money } from "@/lib/format";
+import CatalogSetup from "./CatalogSetup";
+
+const dollars = (c: any) => (c === null || c === undefined || c === "" ? "" : (Number(c) / 100).toFixed(2));
+const cents = (v: string) => (v.trim() === "" ? null : Math.round(Number(v.replace(",", ".")) * 100));
 
 export default function Catalog() {
   const [products, setProducts] = useState<any[]>([]);
@@ -11,15 +15,21 @@ export default function Catalog() {
   const [edit, setEdit] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
   const load = () => portalApi.get("/products/?page_size=200").then((d) => setProducts(results(d)));
-  useEffect(() => {
-    load();
+  const loadRef = () =>
     Promise.all(["/categories/", "/tax-categories/", "/prep-categories/", "/crusts/", "/modifier-groups/"].map((p) => portalApi.get(p))).then(
       ([categories, taxes, preps, crusts, groups]) => setRef({ categories, taxes, preps, crusts, groups }),
     );
+  useEffect(() => {
+    load();
+    loadRef();
   }, []);
+  const missing = [!ref.categories.length && "a menu category", !ref.taxes.length && "a tax category", !ref.preps.length && "a kitchen prep category"].filter(Boolean);
 
   async function save() {
     setError(null);
+    const priceProblem = [["Base price", edit.base_price_cents], ["Min franchise price", edit.min_price_cents], ["Max franchise price", edit.max_price_cents]]
+      .find(([, v]) => v !== null && v !== undefined && !Number.isFinite(v));
+    if (priceProblem) return setError(`${priceProblem[0]}: enter an amount like 12.99`);
     const body = {
       ...edit,
       crusts: edit.crusts || [],
@@ -40,7 +50,10 @@ export default function Catalog() {
   }
 
   return (
-    <Card title="Master product catalogue" actions={<Button onClick={() => setEdit({ sku: "", name: "", status: "draft", category: ref.categories[0]?.id, tax_category: ref.taxes[0]?.id, prep_category: ref.preps[0]?.id, base_price_cents: 0, sizes: [], crusts: [], modifier_groups: [], default_modifiers: [], allow_price_override: true })}>New product</Button>}>
+    <div className="space-y-6">
+    <CatalogSetup onChanged={loadRef} />
+    <Card title="Master product catalogue" actions={<Button disabled={missing.length > 0} title={missing.length ? `Create ${missing.join(", ")} first (Menu setup)` : undefined} onClick={() => setEdit({ sku: "", name: "", status: "draft", category: ref.categories[0]?.id, tax_category: ref.taxes[0]?.id, prep_category: ref.preps[0]?.id, base_price_cents: 0, sizes: [], crusts: [], modifier_groups: [], default_modifiers: [], allow_price_override: true })}>New product</Button>}>
+      {missing.length > 0 && <p className="mb-3 text-sm text-amber-700">To add products, first create {missing.join(", ")} in <b>Menu setup</b> above (or load the starter setup).</p>}
       <Table head={["SKU", "Product", "Category", "Status", "Prices", "Permitted range", "v", ""]} empty={!products.length}>
         {products.map((p) => (
           <tr key={p.id}>
@@ -49,7 +62,7 @@ export default function Catalog() {
             <td className="px-3">{p.category_code}</td>
             <td className="px-3"><Badge tone={p.status === "approved" ? "connected" : p.status === "retired" ? "disabled" : "pending"}>{p.status}</Badge></td>
             <td className="px-3 text-xs">{p.sizes.length ? p.sizes.map((s: any) => `${s.code} ${money(s.price_cents)}`).join(" · ") : money(p.base_price_cents)}</td>
-            <td className="px-3 text-xs">{money(p.min_price_cents)} – {money(p.max_price_cents)}</td>
+            <td className="px-3 text-xs">{p.min_price_cents == null && p.max_price_cents == null ? <span className="text-slate-400">any price</span> : `${p.min_price_cents == null ? "…" : money(p.min_price_cents)} – ${p.max_price_cents == null ? "…" : money(p.max_price_cents)}`}</td>
             <td className="px-3 text-xs">{p.version}</td>
             <td className="px-3"><Button size="sm" variant="ghost" onClick={() => setEdit({ ...p, crusts: p.crusts, modifier_groups: p.modifier_groups.map((g: any) => g.code) })}>Edit</Button></td>
           </tr>
@@ -65,9 +78,9 @@ export default function Catalog() {
             <Field label="Category"><Select value={edit.category} onChange={(e) => setEdit({ ...edit, category: Number(e.target.value) })}>{ref.categories.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}</Select></Field>
             <Field label="Tax category"><Select value={edit.tax_category} onChange={(e) => setEdit({ ...edit, tax_category: Number(e.target.value) })}>{ref.taxes.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}</Select></Field>
             <Field label="Kitchen prep category"><Select value={edit.prep_category} onChange={(e) => setEdit({ ...edit, prep_category: Number(e.target.value) })}>{ref.preps.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}</Select></Field>
-            <Field label="Base price (¢, unsized)"><Input type="number" value={edit.base_price_cents} onChange={(e) => setEdit({ ...edit, base_price_cents: Number(e.target.value) })} /></Field>
-            <Field label="Min franchise price (¢)"><Input type="number" value={edit.min_price_cents ?? ""} onChange={(e) => setEdit({ ...edit, min_price_cents: e.target.value ? Number(e.target.value) : null })} /></Field>
-            <Field label="Max franchise price (¢)"><Input type="number" value={edit.max_price_cents ?? ""} onChange={(e) => setEdit({ ...edit, max_price_cents: e.target.value ? Number(e.target.value) : null })} /></Field>
+            <Field label="Base price $ (products without sizes)"><Input inputMode="decimal" placeholder="12.99" defaultValue={dollars(edit.base_price_cents)} onChange={(e) => setEdit({ ...edit, base_price_cents: cents(e.target.value) ?? 0 })} /></Field>
+            <Field label="Min franchise price $"><Input inputMode="decimal" placeholder="optional" defaultValue={dollars(edit.min_price_cents)} onChange={(e) => setEdit({ ...edit, min_price_cents: cents(e.target.value) })} /></Field>
+            <Field label="Max franchise price $"><Input inputMode="decimal" placeholder="optional" defaultValue={dollars(edit.max_price_cents)} onChange={(e) => setEdit({ ...edit, max_price_cents: cents(e.target.value) })} /></Field>
             <Field label="Image URL"><Input value={edit.image_url || ""} onChange={(e) => setEdit({ ...edit, image_url: e.target.value })} /></Field>
             <Field label="Max toppings (0 = no limit)"><Input type="number" value={edit.max_toppings ?? 0} onChange={(e) => setEdit({ ...edit, max_toppings: Number(e.target.value) })} /></Field>
             <div className="space-y-2 pt-5 text-sm">
@@ -77,9 +90,9 @@ export default function Catalog() {
             </div>
           </div>
           <div className="mt-4 grid gap-4 md:grid-cols-3">
-            <Field label="Sizes (code:name:price¢:modifier%)" hint="One per line, e.g. L:Large:1749:125">
-              <textarea className="h-28 w-full rounded-lg border p-2 font-mono text-xs" defaultValue={(edit.sizes || []).map((s: any) => `${s.code}:${s.name}:${s.price_cents}:${s.modifier_multiplier_percent}`).join("\n")}
-                onChange={(e) => setEdit({ ...edit, sizes: e.target.value.split("\n").filter(Boolean).map((l, i) => { const [code, name, price, mult] = l.split(":"); return { code, name, price_cents: Number(price), modifier_multiplier_percent: Number(mult || 100), sort_order: i }; }) })} />
+            <Field label="Sizes (code:name:price $:topping price %)" hint="One per line, e.g. L:Large:17.49:125 — leave empty for a single-price item">
+              <textarea className="h-28 w-full rounded-lg border p-2 font-mono text-xs" defaultValue={(edit.sizes || []).map((s: any) => `${s.code}:${s.name}:${dollars(s.price_cents)}:${s.modifier_multiplier_percent}`).join("\n")}
+                onChange={(e) => setEdit({ ...edit, sizes: e.target.value.split("\n").filter(Boolean).map((l, i) => { const [code, name, price, mult] = l.split(":"); return { code, name, price_cents: cents(price || "") ?? 0, modifier_multiplier_percent: Number(mult || 100), sort_order: i }; }) })} />
             </Field>
             <Field label="Crusts">
               <div className="space-y-1">{ref.crusts.map((c: any) => (
@@ -102,5 +115,6 @@ export default function Catalog() {
         </Modal>
       )}
     </Card>
+    </div>
   );
 }
