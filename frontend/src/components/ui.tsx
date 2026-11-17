@@ -52,14 +52,17 @@ export function Field({ label, children, hint }: { label: string; children: Reac
 }
 
 export const inputCls =
-  "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-100";
+  "rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-100";
+
+// Full width unless the caller sets an explicit width (avoids conflicting w-* utilities).
+const widthOf = (cls?: string) => (cls && /(^|\s)(w-|min-w-|flex-1)/.test(cls) ? "" : "w-full");
 
 export function Input(p: React.InputHTMLAttributes<HTMLInputElement>) {
-  return <input {...p} className={cx(inputCls, p.className)} />;
+  return <input {...p} className={cx(inputCls, widthOf(p.className), p.className)} />;
 }
 
 export function Select(p: React.SelectHTMLAttributes<HTMLSelectElement>) {
-  return <select {...p} className={cx(inputCls, p.className)} />;
+  return <select {...p} className={cx(inputCls, widthOf(p.className), p.className)} />;
 }
 
 export function Toggle({ checked, onChange, disabled, label }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label?: string }) {

@@ -9,9 +9,12 @@ import Activation from "./Activation";
 import Customizer from "./Customizer";
 import OrderDetail, { printReceipt } from "./OrderDetail";
 import PaymentModal from "./PaymentModal";
+import CashDrawer from "./CashDrawer";
+import DispatchBoard from "./DispatchBoard";
+import { featureOn, useDeviceAgent } from "@/lib/device";
 
 const posApi = api("pos");
-type Tab = "order" | "orders" | "delivery" | "cash" | "availability";
+type Tab = "order" | "orders" | "delivery" | "dispatch" | "cash" | "availability";
 const THIRD_PARTY = ["ubereats", "doordash", "skip"];
 
 export default function PosApp() {
@@ -60,6 +63,15 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
   const [queue, setQueue] = useState<QueuedOrder[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [alertCount, setAlertCount] = useState(0);
+  const [codes, setCodes] = useState<string[]>([]);
+  const [promoIds, setPromoIds] = useState<number[]>([]);
+  const [codeInput, setCodeInput] = useState("");
+  const [quote, setQuote] = useState<any>(null);
+  const { config: deviceConfig, state: deviceState } = useDeviceAgent({
+    appStatus: "pos", syncStatus: () => (navigator.onLine ? "ok" : "offline"),
+    pending: () => queueRef.current, username: session.user.username,
+  });
+  const queueRef = useRef(0);
 
   // ---- menu (cached encrypted for offline use) ---------------------------------------
   const loadMenu = useCallback(async () => {
@@ -93,7 +105,11 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
     }
   }, [store.id]);
 
-  const refreshQueue = useCallback(async () => setQueue(await queued()), []);
+  const refreshQueue = useCallback(async () => {
+    const q = await queued();
+    queueRef.current = q.length;
+    setQueue(q);
+  }, []);
 
   useEffect(() => {
     loadMenu();
@@ -181,7 +197,29 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
     else setCart([...cart, { key: uuid(), product: p, quantity: 1, modifiers: [], removed: [], special_instructions: "" }]);
   }
 
+  // Server-side pricing and promotion evaluation for the current cart (debounced).
+  useEffect(() => {
+    if (!cart.length) {
+      setQuote(null);
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        setQuote(await posApi.post(`/stores/${store.id}/quote/`, {
+          order_type: orderType, items: cart.map(lineToApi), promo_codes: codes, promotion_ids: promoIds,
+          customer: customer.phone ? { phone: customer.phone } : {}, delivery_address: orderType === "delivery" ? address : undefined,
+        }));
+      } catch {
+        setQuote(null);
+      }
+    }, 350);
+    return () => clearTimeout(t);
+  }, [cart, orderType, codes, promoIds, customer.phone, address, store.id]);
+
   function resetOrder() {
+    setCodes([]);
+    setPromoIds([]);
+    setQuote(null);
     setCart([]);
     setCustomer({ name: "", phone: "" });
     setAddress({ line1: "", city: store.city, postal_code: "", instructions: "" });
@@ -199,6 +237,8 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
       customer: customer.name || customer.phone ? customer : undefined,
       delivery_address: orderType === "delivery" ? address : undefined,
       special_instructions: notes,
+      promo_codes: codes,
+      promotion_ids: promoIds,
     };
   }
 
@@ -210,7 +250,15 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
     const order = buildOrder();
     const ref = `${device?.id ?? "x"}-${uuid()}`;
     try {
-      const r = await posApi.post("/orders/", order, { "Idempotency-Key": ref });
+      let r;
+      try {
+        r = await posApi.post("/orders/", order, { "Idempotency-Key": ref });
+      } catch (err) {
+        if (!(err instanceof ApiError && err.code === "manager_authorization_required")) throw err;
+        const code = prompt("This promotion requires manager authorization. Manager code:");
+        if (!code) throw err;
+        r = await posApi.post("/orders/", { ...order, manager_code: code }, { "Idempotency-Key": ref });
+      }
       resetOrder();
       setOnline(true);
       loadOrders();
@@ -253,6 +301,7 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
     ["order", "New order"],
     ["orders", "Orders"],
     ["delivery", "Delivery apps", alertCount],
+    ...((can("dispatch.view") && featureOn(deviceConfig, "dispatch") ? [["dispatch", "Dispatch"]] : []) as [Tab, string][]),
     ["cash", "Cash drawer"],
     ["availability", "86 items"],
   ];
@@ -277,6 +326,8 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
           <Button variant="secondary" size="sm" onClick={onLogout}>{device ? "Lock" : "Sign out"}</Button>
         </div>
       </header>
+      {deviceState?.revoked && <div className="bg-red-700 px-4 py-2 text-sm font-semibold text-white">Device access: {deviceState.revoked}. Contact your manager to re-enroll this terminal.</div>}
+      {deviceState?.versionStatus && ["outdated", "unapproved"].includes(deviceState.versionStatus) && <div className="bg-amber-500 px-4 py-1 text-xs text-ink-900">This POS version is {deviceState.versionStatus}; reload to update.</div>}
       {(error || notice) && (
         <div className="space-y-1 px-4 pt-2">
           <ErrorBanner error={error} />
@@ -311,16 +362,20 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
             <div className="flex items-center gap-2 px-3 text-sm"><Toggle checked={entry === "phone"} onChange={(v) => setEntry(v ? "phone" : "walk_in")} /> Telephone order</div>
             <div className="flex-1 overflow-y-auto px-3 py-2">
               {cart.length === 0 && <p className="py-8 text-center text-slate-400">Tap products to start an order</p>}
-              {cart.map((l) => (
+              {cart.map((l, idx) => {
+                const ql = quote?.lines?.find((x: any) => x.line === idx);
+                return (
                 <div key={l.key} className="border-b py-2">
                   <div className="flex justify-between gap-2">
                     <button className="text-left font-medium" onClick={() => setCustomizing({ product: l.product, line: l })}>{l.quantity}× {l.product.sizes.find((s) => s.code === l.size)?.name} {l.product.name}</button>
-                    <span className="font-semibold">{money(estimateUnit(l) * l.quantity)}</span>
+                    {ql?.discount_cents ? (
+                      <span className="text-right"><s className="text-xs text-slate-400">{money(ql.line_total_cents)}</s> <b className="text-emerald-700">{money(ql.discounted_total_cents)}</b></span>
+                    ) : <span className="font-semibold">{money(ql ? ql.line_total_cents : estimateUnit(l) * l.quantity)}</span>}
                   </div>
                   <div className="text-xs text-slate-500">{describeLine(l).join(" · ")}</div>
                   <button className="text-xs text-red-600" onClick={() => setCart(cart.filter((x) => x.key !== l.key))}>Remove</button>
                 </div>
-              ))}
+              );})}
             </div>
             <div className="space-y-2 border-t p-3">
               <div className="grid grid-cols-2 gap-2">
@@ -335,8 +390,44 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
                 </div>
               )}
               <Input placeholder="Order notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
-              <div className="flex justify-between text-lg font-bold"><span>Subtotal{!online && " (est.)"}</span><span>{money(subtotal)}</span></div>
-              <p className="text-xs text-slate-500">Taxes and fees are calculated by the central server.</p>
+              {can("promotions.apply_code") && featureOn(deviceConfig, "coupon_entry") && (
+                <div className="flex gap-2">
+                  <Input placeholder="Coupon / promo code" value={codeInput} onChange={(e) => setCodeInput(e.target.value.toUpperCase())} />
+                  <Button variant="secondary" disabled={!codeInput} onClick={() => { setCodes([...new Set([...codes, codeInput.trim()])]); setCodeInput(""); }}>Apply</Button>
+                </div>
+              )}
+              {quote?.promotions?.applied?.map((a: any) => (
+                <div key={a.promotion_id} className="flex justify-between text-sm text-emerald-700">
+                  <span>🏷 {a.name}{a.code && ` (${a.code})`}</span>
+                  <span>−{money(a.amount_cents)} {(a.code || promoIds.includes(a.promotion_id)) && <button className="ml-1 text-xs text-slate-400" onClick={() => { setCodes(codes.filter((c) => c !== a.code)); setPromoIds(promoIds.filter((i) => i !== a.promotion_id)); }}>✕</button>}</span>
+                </div>
+              ))}
+              {quote?.promotions?.rejected?.filter((r: any) => r.code || promoIds.includes(r.promotion_id)).map((r: any, i: number) => (
+                <div key={i} className="flex justify-between text-xs text-red-700"><span>{r.code || r.name}: {r.reason}</span>
+                  <button onClick={() => { setCodes(codes.filter((c) => c !== r.code)); setPromoIds(promoIds.filter((x) => x !== r.promotion_id)); }}>✕</button></div>
+              ))}
+              {quote?.promotions?.available?.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {quote.promotions.available.map((a: any) => (
+                    <button key={a.promotion_id} onClick={() => setPromoIds([...promoIds, a.promotion_id])} className="rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-xs text-emerald-800">+ {a.name}</button>
+                  ))}
+                </div>
+              )}
+              {quote?.delivery && quote.delivery.eligible === false && <div className="text-xs text-red-700">{quote.delivery.message}</div>}
+              {quote ? (
+                <div className="space-y-0.5 text-sm">
+                  <div className="flex justify-between"><span>Subtotal</span><span>{money(quote.subtotal_cents)}</span></div>
+                  {quote.discount_cents > 0 && <div className="flex justify-between text-emerald-700"><span>Discounts</span><span>−{money(quote.discount_cents)}</span></div>}
+                  {quote.charges.map((c: any) => <div key={c.code} className="flex justify-between"><span>{c.name}</span><span>{money(c.amount_cents)}</span></div>)}
+                  <div className="flex justify-between"><span>Tax</span><span>{money(quote.tax_cents)}</span></div>
+                  <div className="flex justify-between text-lg font-bold"><span>Total</span><span>{money(quote.total_cents)}</span></div>
+                </div>
+              ) : (
+                <>
+                  <div className="flex justify-between text-lg font-bold"><span>Subtotal{!online && " (est.)"}</span><span>{money(subtotal)}</span></div>
+                  <p className="text-xs text-slate-500">Taxes, fees and promotions are calculated by the central server.</p>
+                </>
+              )}
               <div className="grid grid-cols-2 gap-2">
                 <Button size="xl" variant="secondary" disabled={!cart.length || submitting} onClick={() => submit(false)}>Send (pay later)</Button>
                 <Button size="xl" disabled={!cart.length || submitting} onClick={() => submit(true)}>Pay</Button>
@@ -348,7 +439,8 @@ function Terminal({ session, onLogout }: { session: Session; onLogout: () => voi
 
       {tab === "orders" && <OrdersList orders={orders} queue={queue} onOpen={setDetail} onSync={syncQueue} />}
       {tab === "delivery" && <DeliveryApps orders={orders.filter((o) => THIRD_PARTY.includes(o.source))} onOpen={setDetail} />}
-      {tab === "cash" && <CashPanel can={can} hasDevice={!!device} />}
+      {tab === "dispatch" && <DispatchBoard storeId={store.id} canManage={can("dispatch.manage")} />}
+      {tab === "cash" && <CashDrawer can={can} hasDevice={!!device} cashEnabled={featureOn(deviceConfig, "cash_drawer")} />}
       {tab === "availability" && <AvailabilityPanel storeId={store.id} products={products} can={can} onChange={loadMenu} />}
 
       {customizing && (
@@ -415,55 +507,6 @@ function DeliveryApps({ orders, onOpen }: { orders: any[]; onOpen: (id: string) 
         ))}
         {!orders.length && <p className="text-slate-500">No delivery-app orders today.</p>}
       </div>
-    </div>
-  );
-}
-
-function CashPanel({ can, hasDevice }: { can: (p: string) => boolean; hasDevice: boolean }) {
-  const [session, setSession] = useState<any>(undefined);
-  const [amount, setAmount] = useState("");
-  const [reason, setReason] = useState("");
-  const [mgr, setMgr] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const load = useCallback(() => posApi.get("/cash-sessions/current/").then(setSession).catch(() => setSession(null)), []);
-  useEffect(() => { load(); }, [load]);
-  const run = async (fn: () => Promise<any>) => {
-    setError(null);
-    try { await fn(); setAmount(""); setReason(""); load(); } catch (e) { setError(e instanceof ApiError ? e.describe() : String(e)); }
-  };
-  if (!hasDevice) return <div className="p-6"><Notice tone="warn">Cash drawer requires a registered terminal.</Notice></div>;
-  if (session === undefined) return null;
-  return (
-    <div className="mx-auto w-full max-w-xl space-y-4 p-6">
-      <ErrorBanner error={error} />
-      {!session ? (
-        <div className="space-y-3 rounded-2xl bg-white p-6 shadow-sm">
-          <h2 className="text-xl font-bold">Open cash drawer</h2>
-          <Input type="number" placeholder="Opening float (cents)" value={amount} onChange={(e) => setAmount(e.target.value)} />
-          <Button size="xl" className="w-full" disabled={!can("cash.manage_session")} onClick={() => run(() => posApi.post("/cash-sessions/open/", { opening_float_cents: Number(amount || 0) }))}>Open session</Button>
-        </div>
-      ) : (
-        <div className="space-y-4 rounded-2xl bg-white p-6 shadow-sm">
-          <div className="flex justify-between"><h2 className="text-xl font-bold">Drawer open</h2><span className="text-sm text-slate-500">since {time(session.opened_at)} by {session.opened_by_name}</span></div>
-          <div className="grid grid-cols-2 gap-3 text-center">
-            <div className="rounded-xl bg-slate-50 p-3"><div className="text-xs text-slate-500">Opening float</div><div className="text-xl font-bold">{money(session.opening_float_cents)}</div></div>
-            <div className="rounded-xl bg-slate-50 p-3"><div className="text-xs text-slate-500">Expected in drawer</div><div className="text-xl font-bold">{money(session.expected_now_cents)}</div></div>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Input type="number" placeholder="Amount (cents)" value={amount} onChange={(e) => setAmount(e.target.value)} />
-            <Input placeholder="Reason" value={reason} onChange={(e) => setReason(e.target.value)} />
-            <Input type="password" inputMode="numeric" placeholder="Manager code (if required)" value={mgr} onChange={(e) => setMgr(e.target.value)} />
-            <div className="flex gap-2">
-              <Button variant="secondary" onClick={() => run(() => posApi.post(`/cash-sessions/${session.id}/movements/`, { kind: "paid_in", amount_cents: Number(amount), reason, manager_code: mgr || undefined }))}>Paid in</Button>
-              <Button variant="secondary" onClick={() => run(() => posApi.post(`/cash-sessions/${session.id}/movements/`, { kind: "paid_out", amount_cents: Number(amount), reason, manager_code: mgr || undefined }))}>Paid out</Button>
-            </div>
-          </div>
-          <Button size="lg" variant="danger" className="w-full" onClick={() => {
-            const counted = prompt("Counted cash in drawer (cents)");
-            if (counted !== null) run(() => posApi.post(`/cash-sessions/${session.id}/close/`, { counted_cash_cents: Number(counted) }).then((r) => alert(`Session closed. Expected ${money(r.expected_cash_cents)}, counted ${money(r.counted_cash_cents)}, variance ${money(r.variance_cents)}`)));
-          }}>Close & count drawer</Button>
-        </div>
-      )}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -53,6 +53,7 @@ class KitchenTicketViewSet(ContextMixin, viewsets.GenericViewSet):
     """Kitchen display tickets. Initial state is delivered over WebSocket; this endpoint gives a snapshot."""
 
     permission_classes = [IsStaffUser]
+    serializer_class = serializers.Serializer
 
     def get_queryset(self):
         ids = accessible_store_ids(self.request.user)
@@ -61,6 +62,7 @@ class KitchenTicketViewSet(ContextMixin, viewsets.GenericViewSet):
             qs = qs.filter(store_id__in=ids)
         return qs
 
+    @extend_schema(responses=dict, parameters=[OpenApiParameter("store", int), OpenApiParameter("station", str)])
     def list(self, request):
         if not request.user.has_permission("kitchen.access") and not request.user.has_permission("orders.view"):
             raise PermissionDenied()

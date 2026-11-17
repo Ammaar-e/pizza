@@ -31,6 +31,7 @@ class StaffOrScope(permissions.BasePermission):
 class HeadquartersView(ContextMixin, APIView):
     permission_classes = [IsStaffUser]
 
+    @extend_schema(responses=HeadquartersSerializer)
     def get(self, request):
         hq = Headquarters.objects.first()
         return Response(HeadquartersSerializer(hq).data if hq else {})
@@ -177,6 +178,7 @@ class StoreViewSet(ContextMixin, viewsets.ModelViewSet):
 class NetworkSummaryView(APIView):
     permission_classes = [IsStaffUser]
 
+    @extend_schema(responses=dict)
     def get(self, request):
         if not is_hq(request.user):
             raise PermissionDenied()

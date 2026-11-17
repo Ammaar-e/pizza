@@ -29,6 +29,12 @@ application (`frontend/`) serving four separate interfaces, PostgreSQL and Redis
 | `integrations` | Providers, provider accounts (encrypted credentials), store integrations, webhook events, logs, sync records, mappings, **provider adapters** |
 | `api` | External API clients (API keys, scopes, store restrictions), signed outbound status webhooks |
 | `reporting` | Permission-scoped sales/channel/payment/product/employee/store reports, audit viewer |
+| `promotions` | Promotion engine (types, codes, schedules, limits, stacking), redemptions, franchise policies, reporting |
+| `dispatch` | Delivery zones/fees, delivery lifecycle, drivers, manual/automatic assignment, proof of delivery |
+| `devices` | Device credentials, registration/approval/enrollment, heartbeats & alerts, configuration profiles |
+
+The cash ledger, reconciliation and shift closing live in `payments/cash.py`. See `docs/MODULES.md` for the four
+operations modules.
 
 ## Central order intake
 

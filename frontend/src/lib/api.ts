@@ -1,5 +1,5 @@
 // Thin API client: JWT bearer auth per application namespace, automatic refresh, typed errors.
-export type Namespace = "portal" | "pos" | "kds";
+export type Namespace = "portal" | "pos" | "kds" | "driver";
 
 export interface Session {
   access: string;
@@ -85,10 +85,20 @@ export function saveSession(ns: Namespace, s: Session | null) {
   else localStorage.removeItem(KEY(ns));
 }
 
-export function deviceInfo(): { token: string; id: number; name: string; store: number; store_number?: string; type: string } | null {
+export function deviceInfo(): { token: string; id: number; name: string; store: number; store_number?: string; type: string; pending?: boolean } | null {
   try {
     const raw = localStorage.getItem(DEVICE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    const d = raw ? JSON.parse(raw) : null;
+    return d && !d.pending ? d : null; // a pending (unapproved) device is not presented to the API
+  } catch {
+    return null;
+  }
+}
+
+export function pendingDevice() {
+  try {
+    const d = JSON.parse(localStorage.getItem(DEVICE_KEY) || "null");
+    return d?.pending ? d : null;
   } catch {
     return null;
   }

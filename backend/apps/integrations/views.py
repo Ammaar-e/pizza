@@ -244,7 +244,7 @@ class StoreIntegrationSerializer(serializers.ModelSerializer):
     def get_webhook_url(self, obj):
         return webhook_url(obj.provider.code, obj.account) if obj.account_id else None
 
-    def get_recent_errors(self, obj):
+    def get_recent_errors(self, obj) -> list:
         return [{"at": log.created_at, "operation": log.operation, "message": log.message}
                 for log in obj.logs.filter(level="error")[:5]] if obj.pk else []
 

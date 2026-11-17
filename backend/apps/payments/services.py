@@ -10,7 +10,7 @@ from apps.core.exceptions import ConflictError, DomainError
 from apps.orders.models import Order, OrderStatus, PaymentStatus
 from apps.orders.state import log_event
 
-from .models import CashMovement, CashSession, Payment, PaymentMethod, PaymentState, Refund
+from .models import CashSession, CashTransaction, Payment, PaymentMethod, PaymentState, Refund
 from .processors import ProcessorError, ProcessorNotConfigured, processor_for
 
 PAYMENT_TRANSITIONS = {
@@ -58,7 +58,10 @@ def recompute_order_payment_status(order: Order) -> str:
 
 
 def open_session_for(store, device) -> CashSession | None:
-    return CashSession.objects.filter(store=store, device=device, status=CashSession.STATUS_OPEN).first()
+    """The open register session on the register attached to ``device``."""
+    if device is None:
+        return None
+    return CashSession.objects.filter(store=store, register__device=device, status=CashSession.STATUS_OPEN).first()
 
 
 def take_payment(order: Order, *, method: str, amount_cents: int, user, tendered_cents: int | None = None,
@@ -88,6 +91,10 @@ def take_payment(order: Order, *, method: str, amount_cents: int, user, tendered
         session = open_session_for(order.store, device)
         if session is None:
             raise DomainError("Open a cash session before accepting cash", code="no_cash_session")
+        from apps.devices.services import feature_enabled
+
+        if not feature_enabled(device, "cash_drawer"):
+            raise DomainError("Cash handling is disabled on this device", code="feature_disabled", status_code=403)
 
     processor = processor_for(method, order.store)
     with transaction.atomic():
@@ -116,9 +123,15 @@ def take_payment(order: Order, *, method: str, amount_cents: int, user, tendered
     payment.card_last4 = result.card_last4
     payment.failure_reason = result.failure_reason
     set_payment_state(payment, result.status)
-    if method == PaymentMethod.CASH and result.status == PaymentState.CAPTURED:
-        payment.change_cents = (tendered_cents or 0) - amount_cents
-    payment.save()
+    with transaction.atomic():
+        if method == PaymentMethod.CASH and result.status == PaymentState.CAPTURED:
+            payment.change_cents = (tendered_cents or 0) - amount_cents
+            from .cash import record_ledger
+
+            # Net cash kept in the drawer = amount applied (+ cash tip); change is not a drawer movement.
+            record_ledger(session, CashTransaction.SALE, amount_cents + (tip_cents or 0), user=user,
+                          reason=f"Order #{order.order_number}", order=order, payment=payment)
+        payment.save()
     recompute_order_payment_status(order)
     log_event(order, "payment", f"{method} payment {payment.status}", {"payment_id": str(payment.pk),
                                                                        "amount_cents": amount_cents}, user)
@@ -171,7 +184,16 @@ def refund_payment(payment: Payment, *, amount_cents: int, reason: str, user, ma
     manager = authorize_manager(payment.store, manager_code, "payments.refund", user)
     session = None
     if payment.method == PaymentMethod.CASH:
-        session = open_session_for(payment.store, device) or payment.cash_session
+        session = open_session_for(payment.store, device)
+        if session is None and payment.cash_session and payment.cash_session.status == CashSession.STATUS_OPEN:
+            session = payment.cash_session
+        if session is None:
+            raise DomainError("Cash refunds must be paid out of an open register session on this device",
+                              code="no_cash_session")
+        from apps.devices.services import feature_enabled
+
+        if not feature_enabled(device, "refunds"):
+            raise DomainError("Refunds are disabled on this device", code="feature_disabled", status_code=403)
     proc = processor_for(payment.method, payment.store)
     with transaction.atomic():
         locked = Payment.objects.select_for_update().get(pk=payment.pk)
@@ -193,6 +215,12 @@ def refund_payment(payment: Payment, *, amount_cents: int, reason: str, user, ma
             set_payment_state(locked, PaymentState.REFUNDED if locked.refunded_cents >= locked.amount_cents
                               else PaymentState.PARTIALLY_REFUNDED)
             locked.save()
+            if session is not None:
+                from .cash import record_ledger
+
+                refund.save()
+                record_ledger(session, CashTransaction.REFUND, amount_cents, user=user, reason=reason[:200],
+                              order=payment.order, payment=locked, refund=refund, authorized_by=manager)
         else:
             refund.failure_reason = result.failure_reason
         refund.save()
@@ -204,37 +232,14 @@ def refund_payment(payment: Payment, *, amount_cents: int, reason: str, user, ma
     return refund
 
 
-# ---- Cash sessions --------------------------------------------------------
+# Cash register sessions, the cash ledger, reconciliation and shift closing live in payments.cash.
+from .cash import close_session as close_cash_session  # noqa: E402,F401  (backwards-compatible names)
+from .cash import expected_cash  # noqa: E402,F401
+from .cash import open_session as _open_session  # noqa: E402
+
+
 def open_cash_session(store, device, user, opening_float_cents: int) -> CashSession:
-    if open_session_for(store, device):
-        raise ConflictError("A cash session is already open on this device", code="session_open")
-    s = CashSession.objects.create(store=store, device=device, opened_by=user, opening_float_cents=opening_float_cents)
-    audit("cash_session.open", s, actor=user, store=store, data={"opening_float_cents": opening_float_cents})
-    return s
+    from .cash import register_for_device
 
-
-def expected_cash(session: CashSession) -> int:
-    sales = session.payments.filter(method=PaymentMethod.CASH, status__in=Payment.SETTLED_STATUSES).aggregate(
-        s=Sum("amount_cents"))["s"] or 0
-    refunds = Refund.objects.filter(cash_session=session, status=Refund.STATUS_SUCCEEDED,
-                                    payment__method=PaymentMethod.CASH).aggregate(s=Sum("amount_cents"))["s"] or 0
-    paid_in = session.movements.filter(kind=CashMovement.KIND_PAID_IN).aggregate(s=Sum("amount_cents"))["s"] or 0
-    paid_out = session.movements.filter(kind=CashMovement.KIND_PAID_OUT).aggregate(s=Sum("amount_cents"))["s"] or 0
-    return session.opening_float_cents + sales - refunds + paid_in - paid_out
-
-
-def close_cash_session(session: CashSession, user, counted_cash_cents: int, notes: str = "") -> CashSession:
-    if session.status != CashSession.STATUS_OPEN:
-        raise ConflictError("Cash session already closed", code="session_closed")
-    session.expected_cash_cents = expected_cash(session)
-    session.counted_cash_cents = counted_cash_cents
-    session.variance_cents = counted_cash_cents - session.expected_cash_cents
-    session.closed_by = user
-    session.closed_at = timezone.now()
-    session.status = CashSession.STATUS_CLOSED
-    session.notes = notes
-    session.save()
-    audit("cash_session.close", session, actor=user, store=session.store,
-          data={"expected": session.expected_cash_cents, "counted": counted_cash_cents,
-                "variance": session.variance_cents})
-    return session
+    return _open_session(register_for_device(device), user=user, employee=user,
+                         opening_float_cents=opening_float_cents, device=device)

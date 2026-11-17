@@ -277,24 +277,3 @@ class CatalogVersion(models.Model):
     class Meta:
         unique_together = [("kind", "entity_id", "version")]
         ordering = ["-created_at"]
-
-
-class Discount(TimeStampedModel):
-    TYPE_PERCENT = "percent"
-    TYPE_FIXED = "fixed"
-    TYPES = [(TYPE_PERCENT, "Percent"), (TYPE_FIXED, "Fixed amount")]
-
-    franchisee = models.ForeignKey(
-        "organization.Franchisee", null=True, blank=True, on_delete=models.CASCADE, related_name="discounts",
-        help_text="Null = network-wide (HQ) discount",
-    )
-    code = models.CharField(max_length=30)
-    name = models.CharField(max_length=100)
-    discount_type = models.CharField(max_length=10, choices=TYPES)
-    value = models.PositiveIntegerField(help_text="Basis points for percent (1000=10%), cents for fixed")
-    requires_manager = models.BooleanField(default=False)
-    is_active = models.BooleanField(default=True)
-    max_amount_cents = models.PositiveIntegerField(null=True, blank=True)
-
-    class Meta:
-        unique_together = [("franchisee", "code")]

@@ -4,6 +4,7 @@ import Activation from "@/components/pos/Activation";
 import { Badge, Button, cx } from "@/components/ui";
 import { ApiError, Session, api, loadSession, saveSession, wsUrl } from "@/lib/api";
 import { SOURCE_LABEL } from "@/lib/format";
+import { useDeviceAgent } from "@/lib/device";
 
 const kdsApi = api("kds");
 const NEXT: Record<string, { to: string; label: string; cls: string }> = {
@@ -47,6 +48,8 @@ function Board({ session, onLogout }: { session: Session; onLogout: () => void }
   const [now, setNow] = useState(Date.now());
   const [error, setError] = useState<string | null>(null);
   const [showDone, setShowDone] = useState(false);
+  useDeviceAgent({ appStatus: "kds", syncStatus: () => (navigator.onLine ? "ok" : "offline"), pending: () => 0,
+                   username: session.user.username });
 
   const load = useCallback(async () => {
     try {

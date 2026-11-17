@@ -118,5 +118,23 @@ stale timestamps, and dedupe on `X-Pizza-Event-Id`. Failed deliveries retry with
 `stores/{id}/integrations/{provider}/` (PUT), `…/{provider}/test/`, `…/{provider}/menu-sync/`,
 `…/{provider}/activity/`, `webhook-events/` (+ `retry/`), `integration-mappings/`
 
+**Cash:** `registers/`, `cash-sessions/` (+ `current/`, `open/`, `{id}/transactions/`, `{id}/transfer/`,
+`{id}/close/`, `{id}/approve/`, `{id}/reconciliation/`), `shift-closings/` (+ `print/`, `export/`, `approve/`),
+`reports/cash/`
+
+**Promotions:** `promotions/` (+ `enable/`, `disable/`, `publish/`, `performance/`, `types/`), `promotion-policies/`,
+`reports/promotions/`. Order submission accepts `promo_codes`, `promotion_ids`, `manager_code`; the quote endpoint
+returns applied/rejected/available promotions.
+
+**Dispatch:** `stores/{id}/dispatch/` (+ `assign-many/`), `deliveries/{id}/` (+ `assign/`, `unassign/`,
+`auto-assign/`, `status/`), `drivers/` (+ `availability/`, `history/`), `delivery-zones/`, `driver/me/`,
+`driver/deliveries/{id}/` (+ `status/`, `proof/`), `reports/drivers/`. WebSockets: `/ws/stores/{id}/dispatch/`,
+`/ws/driver/`
+
+**Devices:** `devices/` (+ `summary/`, `{id}/approve|reject|deactivate|reactivate|revoke-credentials|reassign/`,
+`{id}/activity/`), `device-registrations/` (enrollment codes), `device-alerts/` (+ `acknowledge/`),
+`device-profiles/` (+ `versions/`); device-authenticated (`X-Device-Token`): `device-auth/enroll/`,
+`device-auth/heartbeat/`, `device-auth/config/`, `device-auth/rotate/`, `device-auth/me/`. WebSocket: `/ws/devices/`
+
 **External clients & reporting:** `api-clients/` (+ `rotate-key/`, `deliveries/`),
 `reports/summary/`, `audit-logs/`

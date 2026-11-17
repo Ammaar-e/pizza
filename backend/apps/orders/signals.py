@@ -15,11 +15,19 @@ def order_status_changed(order_id, from_status: str, to_status: str) -> None:
     order = Order.objects.select_related("store").filter(pk=order_id).first()
     if order is None:
         return
-    for hook in (kitchen_hook,):
+    from apps.dispatch.services import on_order_status_changed as dispatch_hook
+
+    def promotions_hook(o, _from, to):
+        if to in ("cancelled", "rejected"):
+            from apps.promotions.services import void_redemptions
+
+            void_redemptions(o)
+
+    for hook in (kitchen_hook, promotions_hook, dispatch_hook):
         try:
             hook(order, from_status, to_status)
         except Exception:  # pragma: no cover - never break the chain
-            logger.exception("kitchen hook failed for order %s", order_id)
+            logger.exception("%s failed for order %s", getattr(hook, "__module__", hook), order_id)
     try:
         broadcast_order(order, event="order.status_changed")
     except Exception:  # pragma: no cover
