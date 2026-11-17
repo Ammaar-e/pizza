@@ -123,6 +123,115 @@ class StripeTerminalProcessor:
                                reference=body.get("id", ""))
 
 
+class BBPOSProcessor:
+    """Card-present payments taken on a BBPOS WisePad 3 through the companion **bbpos** service
+    (Stripe Terminal). The POS app creates and collects the charge in bbpos; this processor then
+    verifies the bbpos transaction **server-to-server** before the payment is recorded here, so a
+    client can never mark an order paid by itself.
+
+    Store configuration:
+      payment_config:  {"card_processor": "bbpos", "bbpos_api_url": "https://pos-api.example.com",
+                        "bbpos_allow_mock": false}
+      payment_secrets: {"bbpos_email": "...", "bbpos_password": "..."}   (encrypted at rest)
+    The bbpos service account needs a role with ``pos.charge`` (verification) and, for refunds,
+    ``transactions.refund`` (bbpos manager or admin).
+    """
+
+    name = "bbpos"
+    TOKEN_CACHE = "bbpos-token:{store}"
+
+    def __init__(self, store):
+        self.store = store
+        cfg = store.payment_config or {}
+        self.base = (cfg.get("bbpos_api_url") or "").rstrip("/")
+        self.allow_mock = bool(cfg.get("bbpos_allow_mock"))
+        secrets = store.payment_secrets or {}
+        self.email = secrets.get("bbpos_email")
+        self.password = secrets.get("bbpos_password")
+
+    def _require_config(self):
+        if not self.base or not self.email or not self.password:
+            raise ProcessorNotConfigured("The bbpos card service is not configured for this store "
+                                         "(bbpos_api_url, bbpos_email, bbpos_password)")
+
+    def _token(self, fresh: bool = False) -> str:
+        from django.core.cache import cache
+
+        key = self.TOKEN_CACHE.format(store=self.store.pk)
+        if not fresh and (tok := cache.get(key)):
+            return tok
+        try:
+            r = requests.post(f"{self.base}/api/auth/login", json={"email": self.email, "password": self.password,
+                                                                   "client": "MOBILE"},
+                              timeout=settings.PROVIDER_HTTP_TIMEOUT)
+        except requests.RequestException as e:
+            raise ProcessorError(f"Cannot reach the bbpos service: {e.__class__.__name__}")
+        if r.status_code != 200:
+            raise ProcessorNotConfigured(f"bbpos rejected the service account (HTTP {r.status_code})")
+        body = r.json()
+        cache.set(key, body["accessToken"], max(60, int(body.get("expiresIn", 900)) - 60))
+        return body["accessToken"]
+
+    def _call(self, method: str, path: str, json_body=None) -> requests.Response:
+        self._require_config()
+        for attempt in (0, 1):
+            try:
+                r = requests.request(method, f"{self.base}{path}", json=json_body,
+                                     headers={"Authorization": f"Bearer {self._token(fresh=attempt == 1)}"},
+                                     timeout=settings.PROVIDER_HTTP_TIMEOUT)
+            except requests.RequestException as e:
+                raise ProcessorError(f"Cannot reach the bbpos service: {e.__class__.__name__}")
+            if r.status_code != 401:
+                return r
+        return r
+
+    def verify(self, reference: str, expected_cents: int, currency: str) -> ProcessorResult:
+        if not reference:
+            return ProcessorResult(status="failed", failure_reason="A bbpos transaction id is required")
+        # POST /confirm makes bbpos re-check the PaymentIntent with Stripe (idempotent).
+        r = self._call("POST", f"/api/payments/{reference}/confirm")
+        if r.status_code == 404:
+            return ProcessorResult(status="failed", failure_reason="Unknown bbpos transaction")
+        if r.status_code >= 400:
+            raise ProcessorError(f"bbpos verification failed (HTTP {r.status_code})")
+        tx = r.json()
+        if tx.get("mock") and not self.allow_mock:
+            return ProcessorResult(status="failed", failure_reason="Mock card payments are not accepted for this store")
+        if tx.get("status") != "SUCCEEDED":
+            return ProcessorResult(status="failed", reference=reference,
+                                   failure_reason=f"Card payment is {tx.get('status', 'unknown').lower()}")
+        if int(tx.get("amountCents", -1)) != expected_cents:
+            return ProcessorResult(status="failed", reference=reference,
+                                   failure_reason=f"Card charged {tx.get('amountCents')} cents but {expected_cents} "
+                                                  "were expected")
+        if str(tx.get("currency", "")).upper() != currency.upper():
+            return ProcessorResult(status="failed", reference=reference, failure_reason="Currency mismatch")
+        return ProcessorResult(status="captured", reference=reference, card_brand=(tx.get("cardBrand") or "")[:20],
+                               card_last4=(tx.get("last4") or "")[:4], raw={"bbpos": tx})
+
+    def charge(self, *, amount_cents: int, currency: str, reference: str = "", tip_cents: int = 0,
+               **_) -> ProcessorResult:
+        return self.verify(reference, amount_cents + (tip_cents or 0), currency)
+
+    def confirm(self, reference: str) -> ProcessorResult:
+        return self.verify(reference, -1, self.store.franchisee.headquarters.currency)
+
+    def refund(self, payment, amount_cents: int) -> ProcessorResult:
+        import uuid
+
+        key = str(uuid.uuid5(uuid.NAMESPACE_URL, f"pizza-refund:{payment.pk}:{payment.refunded_cents}:{amount_cents}"))
+        r = self._call("POST", f"/api/transactions/{payment.processor_reference}/refunds",
+                       {"amountCents": amount_cents, "idempotencyKey": key})
+        body = r.json() if r.content else {}
+        code = (body.get("error") or {}).get("code")
+        if code == "INTERAC_REQUIRES_IN_PERSON":
+            return ProcessorResult(status="pending", failure_reason="Interac refunds must be processed in person on "
+                                                                    "the card reader (bbpos app → Transactions)")
+        if r.status_code >= 400:
+            raise ProcessorError((body.get("error") or {}).get("message") or f"bbpos refund failed (HTTP {r.status_code})")
+        return ProcessorResult(status="captured", reference=str(body.get("id", "")))
+
+
 def processor_for(method: str, store):
     if method == "cash":
         return CashProcessor()
@@ -130,6 +239,10 @@ def processor_for(method: str, store):
         provider = (store.payment_config or {}).get("card_processor", "stripe")
         if provider == "stripe":
             return StripeTerminalProcessor(store)
+        if provider == "bbpos":
+            return BBPOSProcessor(store)
+        if provider == "none":
+            raise ProcessorNotConfigured("Card payments are not enabled for this store")
         raise ProcessorNotConfigured(f"Unsupported card processor '{provider}'")
     if method == "online":
         return ExternalReferenceProcessor()

@@ -38,7 +38,7 @@ services:
   migrate:
     <<: *backend
     restart: "no"
-    command: ["./entrypoint-migrate.sh"]
+    command: ["sh", "./entrypoint-migrate.sh"]
     depends_on:
       postgres: { condition: service_healthy }
 

@@ -16,6 +16,7 @@ It is **not** a customer-facing ordering site.
 | Kitchen display | `/kds` | Kitchen staff |
 | Driver app (mobile) | `/driver` | Delivery drivers |
 | API docs | `/api/v1/docs/` | Integrators |
+| **POS tablet/phone app** (Android + iOS) | [`mobile/`](mobile/README.md) | Store staff — card payments on a BBPOS WisePad 3 via **bbpos** |
 
 ## Stack
 
@@ -28,6 +29,7 @@ TypeScript / Tailwind · Nginx · Docker Compose on Ubuntu EC2 (database on EC2,
 backend/            Django modular monolith (apps: core, organization, accounts, catalog, orders,
                     payments, kitchen, integrations, api, reporting, promotions, dispatch, devices) + tests
 frontend/           Next.js app: HQ & franchise portals, POS PWA, KDS
+mobile/             Expo / React Native POS app for Android & iOS tablets and phones (bbpos card payments)
 deploy/             docker-compose (single EC2 / two EC2), nginx, postgres config, backup & restore scripts
 docs/               ARCHITECTURE, API, DEPLOYMENT, integrations/ (Uber Eats, DoorDash, Skip research)
 ```
@@ -81,8 +83,9 @@ franchise owner or HQ (portal → **Devices**), or enroll with a one-time code.
 ## Tests
 
 ```bash
-cd backend && python -m pytest          # 82 tests
+cd backend && python -m pytest          # 88 tests
 cd frontend && npx tsc --noEmit && npm run build
+cd mobile && npm run typecheck && npm test
 ```
 
 The tests cover order processing and pricing (half-and-half, extras, removals, taxes), validation,
@@ -111,7 +114,19 @@ credentials, auth-failure alerts, server-side heartbeat timeouts, outdated versi
 
 Details: [`docs/integrations/`](docs/integrations/README.md).
 
+## Card payments with bbpos (BBPOS WisePad 3)
+
+Stores can use the companion **bbpos** service (Stripe Terminal) as their card processor (portal → Stores →
+Pickup & payments → Card processor = bbpos). The [mobile app](mobile/README.md) charges the exact order total
+on the WisePad 3 through bbpos, and this server **verifies every bbpos transaction server-to-server** (status,
+amount + tip, currency, not reused on another order) before marking the order paid. Refunds are sent to bbpos;
+Interac refunds stay pending until processed with the card present. See `backend/apps/payments/processors.py`
+(`BBPOSProcessor`).
+
 ## Deployment
+
+API down / 502 errors: run `sh deploy/scripts/diagnose.sh` on the server and see
+[`deploy/TROUBLESHOOTING.md`](deploy/TROUBLESHOOTING.md).
 
 See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md): single EC2 (`deploy/docker-compose.yml`) or two
 EC2 instances (`docker-compose.app.yml` + `docker-compose.db.yml`), TLS, private networking,

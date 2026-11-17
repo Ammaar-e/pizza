@@ -130,7 +130,10 @@ See `docs/integrations/README.md`.
 * API keys and device tokens are stored as SHA-256 hashes and shown once. PINs and manager codes are
   Django password hashes.
 * No raw card data is ever accepted. Card payments use Stripe Terminal (card-present, tokenized on
-  the reader), and only the brand/last4/reference are kept.
+  the reader), and only the brand/last4/reference are kept. With the **bbpos** processor the tablet app
+  charges through the bbpos service, and the server re-verifies each bbpos transaction (status, amount + tip,
+  currency, single use) server-to-server before recording it; a unique constraint stops one card transaction
+  from paying two orders.
 * Rate limits: DRF throttles per user/API client (configurable per client), login and webhook
   throttles, and Nginx `limit_req`.
 * Every privileged action writes an immutable `AuditLog`, including the manager who authorized it.
