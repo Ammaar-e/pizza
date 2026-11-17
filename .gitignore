@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+backend/staticfiles/
+backend/media/
+node_modules/
+.next/
+out/
+*.log
+.env
+.env.*
+!.env.example
+deploy/backups/
