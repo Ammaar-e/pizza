@@ -1,6 +1,6 @@
 /** Card reader: choose hardware/simulated/mock, scan for the WisePad 3 over Bluetooth, connect, update. */
 import React from 'react';
-import { ScrollView, Text, View } from 'react-native';
+import { Text, View } from 'react-native';
 import { Banner, Button, Card, Chip, H2, Line, Muted, Row, colors } from '../components/ui';
 import { useApp } from '../state/AppState';
 import { openSystemSettings } from '../terminal/StripeTerminalBridge';
@@ -12,14 +12,13 @@ const MODE_LABEL = { hardware: 'WisePad 3 (Bluetooth)', simulated: 'Stripe simul
 export function ReaderScreen() {
   const t = useTerminal();
   const { mode, setMode, available, nativeAvailable } = useReaderMode();
-  const { bbposUser, bbposConfig, bbposError, cardViaBbpos } = useApp();
+  const { bbposUser, bbposConfig, bbposError } = useApp();
   const err = t.initError ?? t.discoveryError ?? t.connectError;
   const scanning = t.connectionStatus === 'discovering';
 
   return (
-    <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 60, maxWidth: 900, width: '100%', alignSelf: 'center' }}>
-      {!cardViaBbpos ? <Banner tone="warn">This store is not configured for bbpos card payments (franchise portal → Store → Payments → Card processor = bbpos).</Banner> : null}
-      {!bbposUser ? <Banner tone="warn">Sign in to bbpos in Settings → Card payments before connecting a reader.</Banner> : null}
+    <View>
+      {!bbposUser ? <Banner tone="warn">Sign in to bbpos (Settings tab above) before connecting a reader.</Banner> : null}
       {bbposError ? <Banner tone="bad">{`bbpos: ${bbposError}`}</Banner> : null}
       {!nativeAvailable ? (
         <Banner tone="warn">
@@ -94,6 +93,6 @@ export function ReaderScreen() {
           </>
         )}
       </Card>
-    </ScrollView>
+    </View>
   );
 }

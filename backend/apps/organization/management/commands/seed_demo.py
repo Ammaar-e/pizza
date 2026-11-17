@@ -12,18 +12,15 @@ from apps.accounts.models import Role, StoreAssignment, User
 from apps.catalog.models import (
     AdditionalCharge,
     Category,
-    Crust,
     Modifier,
     ModifierGroup,
-    PrepCategory,
     Product,
     ProductDefaultModifier,
     ProductModifierGroup,
     ProductSize,
     StoreProduct,
-    TaxCategory,
-    TaxRate,
 )
+from apps.catalog.starter import apply_starter_catalog
 from apps.kitchen.models import KitchenStation
 from apps.organization.models import Franchisee, Headquarters, Store, StoreHours
 
@@ -32,12 +29,6 @@ STRUCTURE = {
     "B": ("Franchisee B Foods", [("2001", "Kanata", "Ottawa", "ON"), ("2002", "Orleans", "Ottawa", "ON")]),
     "C": ("Franchisee C Group", [("3001", "Plateau", "Montreal", "QC")]),
 }
-
-TOPPINGS = [("TOP-PEP", "Pepperoni", 175), ("TOP-MUSH", "Mushrooms", 150), ("TOP-ONION", "Red onion", 150),
-            ("TOP-GPEP", "Green peppers", 150), ("TOP-OLIVE", "Black olives", 150), ("TOP-BACON", "Bacon", 200),
-            ("TOP-SAUS", "Italian sausage", 200), ("TOP-HAM", "Ham", 175), ("TOP-PINE", "Pineapple", 150),
-            ("TOP-CHEESE", "Mozzarella", 175), ("TOP-JAL", "Jalapeños", 150), ("TOP-CHKN", "Grilled chicken", 250)]
-
 
 class Command(BaseCommand):
     help = "Seed demonstration data (organisation, menu, users)"
@@ -54,39 +45,12 @@ class Command(BaseCommand):
                 "devices_require_approval": True, "franchisee_can_approve_devices": True,
                 "require_registered_device_for_pos": False, "device_offline_after_seconds": 180}})
 
-        # --- taxes, prep categories ------------------------------------------------
-        food, _ = TaxCategory.objects.get_or_create(code="FOOD", defaults={"name": "Prepared food"})
-        TaxRate.objects.get_or_create(tax_category=food, region="ON", name="HST", defaults={"rate_bps": 1300})
-        TaxRate.objects.get_or_create(tax_category=food, region="QC", name="GST", defaults={"rate_bps": 500})
-        TaxRate.objects.get_or_create(tax_category=food, region="QC", name="QST", defaults={"rate_bps": 998})
-        TaxRate.objects.get_or_create(tax_category=food, region="*", name="GST", defaults={"rate_bps": 500})
-        oven, _ = PrepCategory.objects.get_or_create(code="OVEN", defaults={"name": "Pizza oven"})
-        fryer, _ = PrepCategory.objects.get_or_create(code="FRYER", defaults={"name": "Fryer"})
-        cold, _ = PrepCategory.objects.get_or_create(code="COLD", defaults={"name": "Cold / drinks"})
-
-        # --- catalogue --------------------------------------------------------------
-        pizzas, _ = Category.objects.get_or_create(code="PIZZA", defaults={"name": "Pizzas", "sort_order": 1})
-        sides, _ = Category.objects.get_or_create(code="SIDES", defaults={"name": "Sides", "sort_order": 2})
-        drinks, _ = Category.objects.get_or_create(code="DRINKS", defaults={"name": "Drinks", "sort_order": 3})
-        crusts = []
-        for i, (code, name, price) in enumerate([("REG", "Regular", 0), ("THIN", "Thin", 0),
-                                                 ("STUFF", "Cheese-stuffed", 300), ("GF", "Gluten-free", 400)]):
-            c, _ = Crust.objects.get_or_create(code=code, defaults={"name": name, "price_cents": price, "sort_order": i})
-            crusts.append(c)
-        tg, _ = ModifierGroup.objects.get_or_create(code="TOPPINGS", defaults={
-            "name": "Toppings", "max_select": 10, "max_quantity_per_option": 2, "allow_half": True,
-            "half_price_percent": 50, "scale_with_size": True})
-        for i, (code, name, price) in enumerate(TOPPINGS):
-            Modifier.objects.get_or_create(code=code, defaults={"group": tg, "name": name, "price_cents": price,
-                                                                "is_topping": True, "sort_order": i})
-        sauce, _ = ModifierGroup.objects.get_or_create(code="SAUCE", defaults={"name": "Sauce", "max_select": 1})
-        for i, (code, name) in enumerate([("SAU-TOM", "Tomato"), ("SAU-BBQ", "BBQ"), ("SAU-ALF", "Alfredo")]):
-            Modifier.objects.get_or_create(code=code, defaults={"group": sauce, "name": name, "sort_order": i})
-        dips, _ = ModifierGroup.objects.get_or_create(code="DIPS", defaults={"name": "Dips", "max_select": 4,
-                                                                            "max_quantity_per_option": 3})
-        for i, (code, name) in enumerate([("DIP-GAR", "Garlic"), ("DIP-RAN", "Ranch"), ("DIP-BLU", "Blue cheese")]):
-            Modifier.objects.get_or_create(code=code, defaults={"group": dips, "name": name, "price_cents": 99,
-                                                                "sort_order": i})
+        # --- taxes, prep categories, categories, crusts, modifier groups --------------
+        ref = apply_starter_catalog()
+        food, crusts = ref["food"], ref["crusts"]
+        oven, fryer, cold = ref["preps"]["OVEN"], ref["preps"]["FRYER"], ref["preps"]["COLD"]
+        pizzas, sides, drinks = ref["categories"]["PIZZA"], ref["categories"]["SIDES"], ref["categories"]["DRINKS"]
+        tg, sauce, dips = ref["groups"]["TOPPINGS"], ref["groups"]["SAUCE"], ref["groups"]["DIPS"]
 
         def pizza(sku, name, defaults, prices, desc):
             p, created = Product.objects.get_or_create(sku=sku, defaults={

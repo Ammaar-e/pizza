@@ -1,54 +1,43 @@
-# Pizza POS — tablet & phone app (Android + iOS)
+# Pizza POS — Android & iOS app
 
-A native point-of-sale app for the restaurants on the Pizza platform. It runs on **Android tablets and
-phones** and on **iPad / iPhone**. It takes card payments on a **BBPOS WisePad 3** reader through the
-**bbpos** payment service (Stripe Terminal).
+The restaurant POS for **Android tablets/phones and iPad/iPhone**. It is **the same POS as the web version**
+(`https://pos.amrt.ca/pos`): same design, same activation with store number, same device registration by a
+manager, same PIN sign-in, orders, cash drawer, dispatch, delivery apps, 86 list and offline queue. In addition,
+it **connects to the BBPOS WisePad 3 over Bluetooth** to take card payments through **bbpos** (Stripe Terminal),
+which a browser cannot do.
 
 ```
-┌────────────── Pizza POS app (this folder) ──────────────┐
-│ menu · customizer · cart · promotions · orders · cash   │──── HTTPS ───▶ Pizza platform API  (https://pos.amrt.ca/api/v1)
-│ card payment flow (src/lib/cardFlow.ts)                 │                 orders, prices, tax, promotions, cash, devices
-│ Stripe Terminal SDK ─── Bluetooth ─── BBPOS WisePad 3   │──── HTTPS ───▶ bbpos API           (https://<bbpos>/api)
-└──────────────────────────────────────────────────────────┘                 Stripe keys, PaymentIntents, Terminal location
-                                                     Pizza API ── server-to-server ──▶ bbpos  (verifies every card payment)
+┌──────────────────────── Pizza POS app ────────────────────────┐
+│  WebView: the real web POS  (<server>/pos)                    │──HTTPS──▶ Pizza platform (orders, menu, cash…)
+│     │  Payment window → "Card"                                │
+│     ▼  bridge (src/bridge/*, frontend/src/lib/native.ts)       │
+│  Native: card flow · Stripe Terminal SDK · reader & settings  │──HTTPS──▶ bbpos API (PaymentIntents, Stripe)
+│     └── Bluetooth ── BBPOS WisePad 3                          │
+└───────────────────────────────────────────────────────────────┘
+           Pizza server ── server-to-server ──▶ bbpos (verifies every card payment)
 ```
+
+Because the app shows the web POS itself, every POS change on the server appears in the app immediately — no
+app update needed. Only the card reader part is native.
 
 ## How a card payment works
 
-1. The **Pizza server** prices the order (menu, sizes, toppings, promotions, delivery fee, tax).
-2. The app asks **bbpos** to charge exactly the amount due, plus an optional tip chosen on the tablet. It is
-   sent as one custom-amount line with no extra tax, because tax is already in the Pizza total. A per-sale
-   idempotency key makes retries safe.
-3. The customer taps, inserts or swipes on the **WisePad 3** and enters any PIN on the reader. Card data
-   never touches the app.
-4. **bbpos verifies the result with Stripe.** Only `SUCCEEDED` continues. If the result is unclear (for
-   example the network dropped), the app shows **Check again** and never assumes the outcome.
-5. The app records the payment on the order with `reference = bbpos transaction id`. **The Pizza server
-   re-verifies that transaction with bbpos** (status, amount + tip, currency, and that it is not already
-   used on another order) before it marks the order paid.
-6. If step 5 cannot reach the Pizza server, the approved payment is kept in a secure on-device queue and
-   retried every 30 s. The **Orders** tab shows it, and it is never charged twice.
+1. Staff build the order in the POS and press **Pay** → **Card**. The Pizza server has priced it (menu,
+   promotions, delivery fee, tax).
+2. The payment window (same design as the web) shows the reader status and tip buttons; **Charge** hands the
+   amount to the app.
+3. The app asks **bbpos** to charge exactly that amount + tip (one custom-amount line, no extra tax; a per-sale
+   idempotency key makes retries safe), then the customer taps/inserts/swipes on the **WisePad 3**. PIN is
+   entered on the reader; card data never touches the tablet. Reader prompts appear in the payment window.
+4. **bbpos verifies the result with Stripe.** Only `SUCCEEDED` continues; anything unclear shows **Check again**
+   and is never assumed.
+5. The payment is recorded on the order (with the POS's own signed-in session) with
+   `reference = bbpos transaction id`, and **the Pizza server re-verifies it with bbpos** (status, amount + tip,
+   currency, not used on another order) before the order becomes paid.
+6. If saving fails (connection lost), the approved payment is kept in the tablet's secure storage and retried
+   every 30 s; the **Reader** button in the POS header shows a red count until it is saved. It is never charged twice.
 
-The bbpos project is used as-is (branch `claude/adoring-dirac-y07721`). This integration does not change it.
-
-## Features
-
-- Store sign-in with employee username + password, or **PIN** on a registered tablet.
-- Device enrollment code, device registration by a manager, approval check, and heartbeat to the device
-  dashboard (version, status, revocation).
-- Menu by category; pizza customizer with sizes, crusts, removing included toppings, extra toppings,
-  **left/right halves** and special instructions.
-- Live server quote: subtotal, promotions (codes and suggested offers, with manager authorization when
-  required), delivery eligibility, fees and tax.
-- Pickup / delivery / dine-in, walk-in or phone orders, customer and address.
-- Payments: **cash** with change and split amounts; **card via bbpos** with tip presets, custom tip,
-  decline / cancel / retry and uncertain-result handling.
-- Today's orders: status actions (accept, ready, out for delivery, complete, cancel), refunds (with
-  manager code) and receipts.
-- Cash drawer: open with float, drops / paid-outs / corrections, **blind close** with denomination count
-  and variance explanation.
-- Reader screen: hardware / simulated / mock modes, Bluetooth scan, connect, battery, firmware updates.
-- Works on phones (stacked layout) and tablets (side-by-side menu and cart).
+In a normal browser the POS works exactly as before (the reader button and native card option only appear in the app).
 
 ---
 
@@ -145,7 +134,7 @@ and **Settings → Card payments**).
    Copy the printed project id into `.env` as `EAS_PROJECT_ID=…`, **and** add
    `"EAS_PROJECT_ID": "…"` to the `env` block of each profile in `eas.json` (cloud builds do not read `.env`).
 3. In `eas.json` → `development` → `env`, set the server addresses the tablet should use. On a local
-   network, use your computer's LAN IP, for example `http://192.168.1.10:8000`.
+   network, use your computer's LAN IP, for example `http://192.168.1.10:3000` (the Next.js POS, which proxies the API).
 4. Build the APK (about 10–20 minutes in the cloud):
    ```bash
    eas build --profile development --platform android
@@ -230,6 +219,10 @@ Install the APK from the link. For iOS, use `--platform ios` (registered devices
 
 ### Development networking checklist
 
+- The app opens `<server>/pos`. Against a local stack, run the frontend with
+  `cd frontend && npx next dev -H 0.0.0.0 -p 3000` (it proxies `/api` to Django) and the backend on port 8000,
+  then use `http://<LAN IP>:3000` as the server. In production use `https://pos.amrt.ca`.
+
 - The device must reach both servers. With local servers, use the computer's **LAN IP**, never `localhost`.
 - Android blocks `http://` unless the build has `ALLOW_CLEARTEXT=true`. The `development` profile already
   sets it. Production must use **HTTPS**.
@@ -240,20 +233,23 @@ Install the APK from the link. For iOS, use `--platform ios` (registered devices
 
 ## 3. First run on the tablet
 
-1. **Sign in**: store number, employee username and password. To enroll the tablet first, use
-   **Enroll with a code**.
-2. If you are a manager, tap **Register this tablet**. Once registered and approved, staff can sign in with a **PIN**.
-3. **Settings → Card payments**: check the bbpos URL, then **Sign in to bbpos** with the tablet Cashier
-   account. The card shows Stripe mode, Terminal location and any configuration problems.
-4. **Reader tab**: choose **WisePad 3 (Bluetooth)**. Turn the reader on (hold the power button) and keep it
-   close, then tap **Scan for readers** → **Connect**. Android asks for **Nearby devices** and **Location**
-   permissions (Stripe requires both). The first connection may install a reader update; keep the reader
-   charged and nearby.
-5. **Cash tab**: open the register with the starting float. Cash is only allowed on a registered, approved tablet.
-6. Take a test order: **New order** → add items → **Pay** → **Card**.
-   - Stripe test mode with a real WisePad 3 needs a **Stripe physical test card**.
-   - Without hardware, use **Stripe simulated reader** mode (needs bbpos test mode) or **Mock** mode
-     (no Stripe, no money; turn on "Accept bbpos MOCK transactions" for the store while testing).
+1. Open **Pizza POS**. It loads the POS from the server in `.env` / `eas.json` (change it later in
+   **Reader → bbpos & server**, or from the "POS not reachable" screen).
+2. **POS activation** — exactly like the web POS: store number + employee username + password. A manager
+   registers the tablet (**Register device**), or use **Enroll this device with a code**. After approval, staff
+   sign in with their **PIN**.
+3. Tap **Reader** in the POS header → **bbpos & server** → **Sign in to bbpos** with the tablet Cashier account
+   (the bbpos URL is filled in from the store's payment settings). It shows Stripe mode, Terminal location and
+   any configuration problem.
+4. **WisePad 3 reader** tab: choose **WisePad 3 (Bluetooth)**, turn the reader on (hold the power button),
+   keep it close → **Scan for readers** → **Connect**. Android asks for *Nearby devices* and *Location*
+   (Stripe requires both). The first connection may install a reader update — keep it charged and nearby.
+   The header button turns green and shows the battery level.
+5. **Cash drawer** tab → open the register (same as the web POS).
+6. Test: **New order** → add items → **Pay** → **Card** → choose a tip → **Charge**.
+   - Stripe test mode + real WisePad 3 → use a **Stripe physical test card**.
+   - Without hardware → **Stripe simulated reader** mode (bbpos in test mode), or **Mock** (no Stripe, no money;
+     turn on "Accept bbpos MOCK transactions" for the store while testing).
 
 ## 4. Going live
 
@@ -295,11 +291,12 @@ npm test
 
 | Path | What it is |
 |---|---|
-| `src/lib/pizzaApi.ts` | Pizza API client: POS JWT with refresh, device credential |
+| `src/bridge/PosWebView.tsx` | Hosts the web POS and answers its requests (card status, charge, cancel, reader panel) |
+| `src/bridge/protocol.ts` | Bridge message types (web side: `frontend/src/lib/native.ts`) |
+| `src/lib/cardFlow.ts` | Card payment orchestration, idempotency, approved-payment queue |
 | `src/lib/bbposApi.ts` | bbpos API client and the contract used |
-| `src/lib/cardFlow.ts` | Card payment orchestration, idempotency and the pending-record queue |
-| `src/terminal/` | Stripe Terminal SDK bridge, mock reader and mode selection (adapted from bbpos) |
-| `src/screens/` | Login, New order, Customizer, Payment, Orders, Cash, Reader, Settings |
+| `src/terminal/` | Stripe Terminal SDK bridge, mock reader, mode selection (adapted from bbpos) |
+| `src/screens/ReaderScreen.tsx`, `SettingsScreen.tsx` | Native reader / bbpos / server panel |
 | `app.config.ts`, `eas.json` | Native configuration and build profiles |
 
 Security: tokens and device credentials are stored in the iOS Keychain / Android Keystore

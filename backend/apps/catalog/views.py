@@ -330,3 +330,18 @@ class QuoteView(ContextMixin, APIView):
                          "subtotal_cents": subtotal, "discount_cents": discount, "promotions": ev.as_dict(),
                          "delivery": delivery, "charges": charges, "tax_cents": tax,
                          "total_cents": subtotal - discount + tax + ch_total})
+
+
+class StarterCatalogView(ContextMixin, APIView):
+    """Create the standard reference data (categories, tax categories/rates, kitchen prep categories, crusts,
+    toppings/sauce/dips) on a fresh installation. Idempotent: existing records are left unchanged."""
+
+    permission_classes = [HQWritePermission]
+
+    @extend_schema(request=None, responses=dict)
+    def post(self, request):
+        from .starter import apply_starter_catalog
+
+        result = apply_starter_catalog()
+        audit("catalog.starter_setup", None, data=result["created"])
+        return Response({"created": result["created"]})

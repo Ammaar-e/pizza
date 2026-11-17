@@ -13,3 +13,4 @@ out/
 !.env.example
 deploy/backups/
 *.tsbuildinfo
+dump.rdb

@@ -16,7 +16,7 @@ It is **not** a customer-facing ordering site.
 | Kitchen display | `/kds` | Kitchen staff |
 | Driver app (mobile) | `/driver` | Delivery drivers |
 | API docs | `/api/v1/docs/` | Integrators |
-| **POS tablet/phone app** (Android + iOS) | [`mobile/`](mobile/README.md) | Store staff — card payments on a BBPOS WisePad 3 via **bbpos** |
+| **POS app** (Android + iOS) — the same POS in a native app | [`mobile/`](mobile/README.md) | Store staff — adds Bluetooth card payments on a BBPOS WisePad 3 via **bbpos** |
 
 ## Stack
 
@@ -29,7 +29,7 @@ TypeScript / Tailwind · Nginx · Docker Compose on Ubuntu EC2 (database on EC2,
 backend/            Django modular monolith (apps: core, organization, accounts, catalog, orders,
                     payments, kitchen, integrations, api, reporting, promotions, dispatch, devices) + tests
 frontend/           Next.js app: HQ & franchise portals, POS PWA, KDS
-mobile/             Expo / React Native POS app for Android & iOS tablets and phones (bbpos card payments)
+mobile/             Expo app for Android & iOS: the web POS + native BBPOS WisePad 3 card reader (bbpos)
 deploy/             docker-compose (single EC2 / two EC2), nginx, postgres config, backup & restore scripts
 docs/               ARCHITECTURE, API, DEPLOYMENT, integrations/ (Uber Eats, DoorDash, Skip research)
 ```
@@ -117,8 +117,8 @@ Details: [`docs/integrations/`](docs/integrations/README.md).
 ## Card payments with bbpos (BBPOS WisePad 3)
 
 Stores can use the companion **bbpos** service (Stripe Terminal) as their card processor (portal → Stores →
-Pickup & payments → Card processor = bbpos). The [mobile app](mobile/README.md) charges the exact order total
-on the WisePad 3 through bbpos, and this server **verifies every bbpos transaction server-to-server** (status,
+Pickup & payments → Card processor = bbpos). Inside the [POS app](mobile/README.md), the payment window charges the
+exact order total on the WisePad 3 through bbpos, and this server **verifies every bbpos transaction server-to-server** (status,
 amount + tip, currency, not reused on another order) before marking the order paid. Refunds are sent to bbpos;
 Interac refunds stay pending until processed with the card present. See `backend/apps/payments/processors.py`
 (`BBPOSProcessor`).
