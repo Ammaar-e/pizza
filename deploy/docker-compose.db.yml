@@ -1,0 +1,49 @@
+# Option B — EC2 #2 (database instance): PostgreSQL, Redis and backups.
+# Ports are bound to the instance's PRIVATE IP only; the security group must allow 5432/6379 solely
+# from the application instance's security group.
+# Usage on EC2 #2:  cd deploy && docker compose -f docker-compose.db.yml --env-file .env up -d
+name: pizza-db
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports: ["${PRIVATE_IP:?set PRIVATE_IP to this instance's private address}:5432:5432"]
+    volumes:
+      - ${PG_DATA_DIR:-/srv/pizza/pgdata}:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf", "-c", "hba_file=/etc/postgresql/pg_hba.conf",
+              "-c", "shared_buffers=1GB", "-c", "effective_cache_size=3GB"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    ports: ["${PRIVATE_IP}:6379:6379"]
+    volumes: [redisdata:/data]
+
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PGHOST: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ${BACKUP_DIR:-/srv/pizza/backups}:/backups
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "/scripts/backup-loop.sh"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+volumes:
+  redisdata:

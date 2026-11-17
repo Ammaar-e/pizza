@@ -1,0 +1,56 @@
+# Option B — EC2 #1 (application instance): Nginx, Next.js, Django/Daphne (API + WebSockets),
+# Celery worker and beat. Connects to EC2 #2 over the VPC private network (POSTGRES_HOST / REDIS_URL
+# in .env point at the database instance's private IP).
+# Usage on EC2 #1:  cd deploy && docker compose -f docker-compose.app.yml --env-file .env up -d --build
+name: pizza-app
+
+x-backend: &backend
+  build: ../backend
+  image: pizza-backend:latest
+  env_file: .env
+  restart: unless-stopped
+  volumes:
+    - media:/app/media
+
+services:
+  migrate:
+    <<: *backend
+    restart: "no"
+    command: ["./entrypoint-migrate.sh"]
+
+  backend:
+    <<: *backend
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck: { test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz/"], interval: 15s, retries: 5 }
+
+  worker:
+    <<: *backend
+    command: ["celery", "-A", "config", "worker", "-Q", "default,integrations", "-c", "4", "-l", "INFO"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  beat:
+    <<: *backend
+    command: ["celery", "-A", "config", "beat", "-l", "INFO", "-s", "/tmp/celerybeat-schedule"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  frontend:
+    build: ../frontend
+    image: pizza-frontend:latest
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    depends_on: [backend, frontend]
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${TLS_CERT_DIR:-/srv/pizza/certs}:/etc/nginx/certs:ro
+      - ${ACME_WEBROOT:-/srv/pizza/acme}:/var/www/certbot:ro
+      - media:/srv/media:ro
+
+volumes:
+  media:
